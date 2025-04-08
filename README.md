@@ -14,7 +14,7 @@ A ComfyUI node that generates tiled image compositions with overlapping regions.
 1. Clone this repository into your ComfyUI custom_nodes folder:
    ```
    cd ComfyUI/custom_nodes
-   git clone https://github.com/YOUR_USERNAME/tiled-image-generator.git
+   git clone https://github.com/rickyars/comfyui-llm-tile.git
    ```
 
 2. Restart ComfyUI or reload the UI

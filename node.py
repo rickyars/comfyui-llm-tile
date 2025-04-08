@@ -442,70 +442,13 @@ class TiledImageGenerator:
 
             # Use maximum to preserve existing stronger keep regions (values closer to 0)
             mask[0, y, :, 0] = torch.maximum(alpha_tensor, mask[0, y, :, 0])
-class TilePromptTemplateNode:
-    """
-    Helper node to generate a template JSON for the TiledImageGenerator
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "main_prompt": ("STRING", {"multiline": True}),
-                "grid_width": ("INT", {"default": 4, "min": 1, "max": 8}),
-                "grid_height": ("INT", {"default": 6, "min": 1, "max": 8})
-            }
-        }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("json_template",)
-    FUNCTION = "generate_template"
-    CATEGORY = "utils"
-
-    def generate_template(self, main_prompt, grid_width, grid_height):
-        """
-        Generate a template JSON structure for tile prompts
-        """
-        template = []
-
-        for y in range(grid_height):
-            for x in range(grid_width):
-                # Create position-aware description
-                if x == 0 and y == 0:
-                    position_desc = "top-left corner"
-                elif x == grid_width - 1 and y == 0:
-                    position_desc = "top-right corner"
-                elif x == 0 and y == grid_height - 1:
-                    position_desc = "bottom-left corner"
-                elif x == grid_width - 1 and y == grid_height - 1:
-                    position_desc = "bottom-right corner"
-                elif x == 0:
-                    position_desc = "left edge"
-                elif x == grid_width - 1:
-                    position_desc = "right edge"
-                elif y == 0:
-                    position_desc = "top edge"
-                elif y == grid_height - 1:
-                    position_desc = "bottom edge"
-                else:
-                    position_desc = "middle section"
-
-                template.append({
-                    "position": {"x": x + 1, "y": y + 1},
-                    "prompt": f"{main_prompt}, {position_desc} of the composition"
-                })
-
-        return json.dumps(template, indent=2)
-
 
 # This part is needed for ComfyUI to recognize the nodes
 NODE_CLASS_MAPPINGS = {
     "TiledImageGenerator": TiledImageGenerator,
-    "TilePromptTemplateNode": TilePromptTemplateNode
 }
 
 # Add descriptions for the web UI
 NODE_DISPLAY_NAME_MAPPINGS = {
     "TiledImageGenerator": "Tiled Image Generator",
-    "TilePromptTemplateNode": "Tile Prompt Template"
 }
