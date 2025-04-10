@@ -184,32 +184,35 @@ class TiledImageGenerator:
                             # Mark these areas as "keep" in the mask
                             outpaint_mask[0, :top_overlap_height, :, :] = 0
 
-                    # Encode working tensor to latent space
-                    latent_image = vae.encode(working_tensor)
+                    # 1. Get a properly sized empty latent shape
+                    with torch.no_grad():
+                        latent_shape = vae.encode(working_tensor).shape
 
-                    # Prepare mask for sampling (needs [B, 1, H, W] format)
+                    # 2. Create empty latent tensor with correct shape
+                    latent_image = torch.zeros(latent_shape, device=device)
+
+                    # 3. Generate noise
+                    noise = comfy.sample.prepare_noise(latent_image, current_seed, None)
+
+                    # 4. Create the latent mask (1 = generate, 0 = keep)
                     mask_vae = outpaint_mask.permute(0, 3, 1, 2)
-
-                    # Resize the mask to match latent dimensions
                     latent_mask = torch.nn.functional.interpolate(
-                        mask_vae, size=(tile_height // 8, tile_width // 8), mode="bilinear"
+                        mask_vae, size=(latent_shape[2], latent_shape[3]), mode="bilinear"
                     )
 
-                    # Generate noise
-                    noise = comfy.sample.prepare_noise(latent_image, seed, None)
-
-                    # Create conditioning with ControlNet
+                    # 5. Apply ControlNet to conditioning
                     conditioning = self.apply_controlnet(
                         positive=pos_cond,
                         negative=negative,
                         control_net=controlnet,
-                        image=working_tensor,
+                        image=working_tensor,  # The image with content + black regions
                         strength=controlnet_strength,
-                        start_percent=0.0,  # You can expose these as parameters if needed
+                        start_percent=0.0,
                         end_percent=1.0,
-                        vae=vae  # Pass your VAE if you have it
+                        vae=vae
                     )
 
+                    # 6. Sample with the noise, empty latent, and mask
                     samples = comfy.sample.sample(
                         model,
                         noise,
@@ -219,8 +222,7 @@ class TiledImageGenerator:
                         scheduler,
                         conditioning[0],
                         conditioning[1],
-                        latent_image,
-                        noise_mask=latent_mask
+                        latent_image
                     )
 
                     # Decode
