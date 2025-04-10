@@ -46,30 +46,35 @@ class TiledImageGenerator:
 
     def apply_controlnet(self, positive, negative, control_net, image, strength, start_percent, end_percent, vae=None,
                          extra_concat=[]):
-        # Direct copy of the ComfyUI implementation
         if strength == 0:
             return (positive, negative)
+
         control_hint = image.movedim(-1, 1)
-        cnets = {}
         out = []
+
         for conditioning in [positive, negative]:
             c = []
             for t in conditioning:
                 d = t[1].copy()
                 prev_cnet = d.get('control', None)
-                if prev_cnet in cnets:
-                    c_net = cnets[prev_cnet]
-                else:
-                    c_net = control_net.copy().set_cond_hint(control_hint, strength, (start_percent, end_percent),
-                                                             vae=vae, extra_concat=extra_concat)
-                    c_net.set_previous_controlnet(prev_cnet)
-                    cnets[prev_cnet] = c_net
-                d['control'] = c_net
+
+                # Apply the controlnet directly without copying
+                # Create a temporary controlnet application that doesn't persist
+                temp_cnet = control_net.set_cond_hint(control_hint, strength,
+                                                      (start_percent, end_percent),
+                                                      vae=vae, extra_concat=extra_concat)
+
+                # Set previous controlnet but don't store in a dictionary
+                if prev_cnet is not None:
+                    temp_cnet.set_previous_controlnet(prev_cnet)
+
+                d['control'] = temp_cnet
                 d['control_apply_to_uncond'] = False
                 n = [t[0], d]
                 c.append(n)
             out.append(c)
-        return (out[0], out[1])
+
+        return out[0], out[1]
 
     def generate_tiled_image(self, json_tile_prompts, grid_width, grid_height,
                              tile_width, tile_height, overlap_percent, seed,
@@ -103,6 +108,9 @@ class TiledImageGenerator:
         import comfy.sample
         import comfy.samplers
         import comfy.controlnet
+
+        # Store a reference to the original controlnet - don't make copies
+        original_controlnet = controlnet
 
         # Generate tiles one by one
         for y in range(grid_height):
@@ -204,7 +212,7 @@ class TiledImageGenerator:
                     conditioning = self.apply_controlnet(
                         positive=pos_cond,
                         negative=negative,
-                        control_net=controlnet,
+                        control_net=original_controlnet,
                         image=working_tensor,  # The image with content + black regions
                         strength=controlnet_strength,
                         start_percent=0.0,
