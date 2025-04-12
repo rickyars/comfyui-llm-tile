@@ -16,25 +16,25 @@ class TiledImageGenerator:
         return {
             "required": {
                 "json_tile_prompts": ("STRING", {"multiline": True}),
-                "grid_width": ("INT", {"default": 4, "min": 1, "max": 8}),
-                "grid_height": ("INT", {"default": 6, "min": 1, "max": 8}),
-                "tile_width": ("INT", {"default": 512, "min": 256, "max": 1024}),
-                "tile_height": ("INT", {"default": 512, "min": 256, "max": 1024}),
-                "overlap_percent": ("FLOAT", {"default": 0.15, "min": 0.05, "max": 0.5}),
+                "global_positive": ("STRING", {"multiline": True, "default": ""}),
+                "global_negative": ("STRING", {"multiline": True, "default": ""}),
+                "grid_width": ("INT", {"default": 4, "min": 1, "max": 16}),
+                "grid_height": ("INT", {"default": 6, "min": 1, "max": 16}),
+                "tile_width": ("INT", {"default": 1024, "min": 256, "max": 2048}),
+                "tile_height": ("INT", {"default": 1024, "min": 256, "max": 2048}),
+                "overlap_percent": ("FLOAT", {"default": 0.15, "min": 0.05, "max": 0.5, "step": 0.01}),
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
                 "controlnet": ("CONTROL_NET",),
-                "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "sampler_name": (["euler", "euler_ancestral", "heun", "dpm_2", "dpm_2_ancestral",
                                   "lms", "dpm_fast", "dpm_adaptive", "dpmpp_2s_ancestral",
                                   "dpmpp_sde", "dpmpp_sde_gpu", "dpmpp_2m", "dpmpp_2m_sde",
                                   "dpmpp_3m_sde", "ddim", "uni_pc", "uni_pc_bh2"],),
                 "scheduler": (["normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform"],),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 100}),
-                "cfg": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0}),
+                "cfg": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
             }
         }
@@ -76,9 +76,9 @@ class TiledImageGenerator:
 
         return out[0], out[1]
 
-    def generate_tiled_image(self, json_tile_prompts, grid_width, grid_height,
+    def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative, grid_width, grid_height,
                              tile_width, tile_height, overlap_percent, seed,
-                             model, clip, vae, positive, negative, steps, cfg,
+                             model, clip, vae, steps, cfg,
                              controlnet, controlnet_strength, sampler_name, scheduler):
         """Generate a tiled image composition with proper overlapping and seeding using ControlNet for outpainting."""
 
@@ -119,11 +119,17 @@ class TiledImageGenerator:
                 current_prompt = tile_prompts[idx]
                 current_seed = seed + idx
 
-                print(f"Generating tile ({x + 1},{y + 1}) with prompt: {current_prompt}")
+                # Create the combined prompt
+                combined_prompt = f"{current_prompt} {global_positive}" if global_positive else current_prompt
+                print(f"Generating tile ({x + 1},{y + 1}) with prompt: {combined_prompt}")
 
-                # Create tile-specific conditioning
-                tokens = clip.tokenize(current_prompt)
-                pos_cond = clip.encode_from_tokens_scheduled(tokens)
+                # Encode the combined prompt
+                pos_tokens = clip.tokenize(combined_prompt)
+                pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
+
+                # Encode the negative prompt
+                neg_tokens = clip.tokenize(global_negative)
+                neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
 
                 # Calculate position in the final image
                 pos_x = x * (tile_width - overlap_x)
@@ -150,7 +156,7 @@ class TiledImageGenerator:
                         sampler_name,
                         scheduler,
                         pos_cond,
-                        negative,
+                        neg_cond,
                         latent_image
                     )
 
@@ -211,7 +217,7 @@ class TiledImageGenerator:
                     # 5. Apply ControlNet to conditioning
                     conditioning = self.apply_controlnet(
                         positive=pos_cond,
-                        negative=negative,
+                        negative=neg_cond,
                         control_net=original_controlnet,
                         image=working_tensor,  # The image with content + black regions
                         strength=controlnet_strength,
