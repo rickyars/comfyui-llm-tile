@@ -1,13 +1,11 @@
 import json
 import torch
-import comfy.sample
-import comfy.controlnet
 
 
-class TiledImageGenerator:
+class TiledFluxGenerator:
     """
-    ComfyUI node that generates a tiled image composition with overlapping regions
-    that serve as seeds for neighboring tiles, using ControlNet Union SDXL for outpainting.
+    ComfyUI node that generates a tiled image composition based on LLM-generated prompts
+    using standard inpainting instead of ControlNet for creating seamless multi-tile compositions.
     """
 
     @classmethod
@@ -19,16 +17,16 @@ class TiledImageGenerator:
                 "json_tile_prompts": ("STRING", {"multiline": True}),
                 "global_positive": ("STRING", {"multiline": True, "default": ""}),
                 "global_negative": ("STRING", {"multiline": True, "default": ""}),
-                "grid_width": ("INT", {"default": 4, "min": 1, "max": 16}),
-                "grid_height": ("INT", {"default": 6, "min": 1, "max": 16}),
-                "tile_width": ("INT", {"default": 1024, "min": 256, "max": 2048}),
-                "tile_height": ("INT", {"default": 1024, "min": 256, "max": 2048}),
-                "overlap_percent": ("FLOAT", {"default": 0.15, "min": 0.05, "max": 0.5, "step": 0.01}),
+                "grid_width": ("INT", {"default": 4, "min": 1, "max": 8}),
+                "grid_height": ("INT", {"default": 6, "min": 1, "max": 8}),
+                "tile_width": ("INT", {"default": 512, "min": 256, "max": 1024}),
+                "tile_height": ("INT", {"default": 512, "min": 256, "max": 1024}),
+                "overlap_percent": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 0.5, "step": 0.01}),
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
-                "controlnet": ("CONTROL_NET",),
-                "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feathering": ("INT", {"default": 40, "min": 0, "max": 512, "step": 1}),
+                "flux_guidance": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 10.0, "step": 0.1}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 100}),
@@ -42,43 +40,24 @@ class TiledImageGenerator:
     FUNCTION = "generate_tiled_image"
     CATEGORY = "image/generation"
 
-    def apply_controlnet(self, positive, negative, control_net, image, strength, start_percent, end_percent, vae=None,
-                         extra_concat=[]):
-        if strength == 0:
-            return (positive, negative)
+    def _conditioning_set_values(self, conditioning, values):
+        """Helper method to set values in conditioning."""
+        c = []
+        for t in conditioning:
+            d = t[1].copy()
+            for k, v in values.items():
+                d[k] = v
+            n = [t[0], d]
+            c.append(n)
+        return c
 
-        control_hint = image.movedim(-1, 1)
-        out = []
-
-        for conditioning in [positive, negative]:
-            c = []
-            for t in conditioning:
-                d = t[1].copy()
-                prev_cnet = d.get('control', None)
-
-                # Apply the controlnet directly without copying
-                # Create a temporary controlnet application that doesn't persist
-                temp_cnet = control_net.set_cond_hint(control_hint, strength,
-                                                      (start_percent, end_percent),
-                                                      vae=vae, extra_concat=extra_concat)
-
-                # Set previous controlnet but don't store in a dictionary
-                if prev_cnet is not None:
-                    temp_cnet.set_previous_controlnet(prev_cnet)
-
-                d['control'] = temp_cnet
-                d['control_apply_to_uncond'] = False
-                n = [t[0], d]
-                c.append(n)
-            out.append(c)
-
-        return out[0], out[1]
-
-    def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative, grid_width, grid_height,
-                             tile_width, tile_height, overlap_percent, seed,
-                             model, clip, vae, steps, cfg,
-                             controlnet, controlnet_strength, sampler_name, scheduler):
-        """Generate a tiled image composition with proper overlapping and seeding using ControlNet for outpainting."""
+    def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative,
+                             grid_width, grid_height, tile_width, tile_height,
+                             overlap_percent, seed, model, clip, vae, feathering,
+                             flux_guidance, steps, cfg, sampler_name, scheduler):
+        """Generate a tiled image composition using inpainting."""
+        # Import directly from ComfyUI
+        from nodes import common_ksampler
 
         # Parse the JSON tile prompts
         tile_prompts = self._parse_tile_prompts(json_tile_prompts, grid_width, grid_height)
@@ -91,8 +70,7 @@ class TiledImageGenerator:
         final_width = tile_width + (grid_width - 1) * (tile_width - overlap_x)
         final_height = tile_height + (grid_height - 1) * (tile_height - overlap_y)
 
-        # Create a blank canvas for the final composite
-        # [B, H, W, C] format for ComfyUI
+        # Create a blank canvas for the final composite (gray fill)
         final_tensor = torch.ones((1, final_height, final_width, 3), dtype=torch.float32) * 0.5
 
         # Storage for individual tiles
@@ -101,9 +79,6 @@ class TiledImageGenerator:
         # Get device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
-
-        # Store a reference to the original controlnet - don't make copies
-        original_controlnet = controlnet
 
         # Generate tiles one by one
         for y in range(grid_height):
@@ -124,46 +99,68 @@ class TiledImageGenerator:
                 neg_tokens = clip.tokenize(global_negative)
                 neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
 
+                # Flux Guidance
+                if flux_guidance is not None and flux_guidance > 0:
+                    pos_cond = self._conditioning_set_values(pos_cond, {"guidance": flux_guidance})
+                    neg_cond = self._conditioning_set_values(neg_cond, {"guidance": flux_guidance})
+
                 # Calculate position in the final image
                 pos_x = x * (tile_width - overlap_x)
                 pos_y = y * (tile_height - overlap_y)
 
                 # For first tile, simply generate
                 if x == 0 and y == 0:
-                    # Standard sampling without mask or controlnet
+                    # Standard sampling without inpainting
                     latent_height = tile_height // 8
                     latent_width = tile_width // 8
 
-                    # Create an empty latent image as required by sample()
-                    latent_image = torch.zeros([1, 4, latent_height, latent_width], device=device)
+                    # Create an empty latent image DICTIONARY as required by common_ksampler()
+                    latent_tensor = torch.zeros([1, 4, latent_height, latent_width], device=device)
+                    latent_dict = {"samples": latent_tensor}
 
-                    # Generate noise
-                    noise = comfy.sample.prepare_noise(latent_image, seed, None)
-
-                    # Sample using standard method
-                    samples = comfy.sample.sample(
+                    # Sample using common_ksampler
+                    output = common_ksampler(
                         model,
-                        noise,
+                        current_seed,
                         steps,
                         cfg,
                         sampler_name,
                         scheduler,
                         pos_cond,
                         neg_cond,
-                        latent_image
+                        latent_dict,
+                        denoise=1.0
                     )
 
+                    latent_output = output[0]  # common_ksampler returns a tuple
+
                     # Decode
-                    tile_tensor = vae.decode(samples)
+                    tile_tensor = vae.decode(latent_output["samples"])
 
                 else:
-                    # For subsequent tiles, use outpainting with ControlNet Union
+                    # For subsequent tiles, use inpainting with context from already generated tiles
 
-                    # Create a completely black canvas for this tile
-                    working_tensor = torch.zeros((1, tile_height, tile_width, 3), dtype=torch.float32)
+                    # Create a completely gray canvas for this tile (instead of black)
+                    working_tensor = torch.ones((1, tile_height, tile_width, 3), dtype=torch.float32) * 0.5
 
                     # Create a mask where 1 = areas to generate, 0 = keep black areas
                     outpaint_mask = torch.ones((1, tile_height, tile_width, 1), dtype=torch.float32)
+
+                    # After setting the overlap regions in the mask to 0
+                    if feathering > 0:
+                        # Apply feathering at the left edge if needed
+                        if x > 0:
+                            for j in range(min(feathering, tile_width - overlap_x)):
+                                pos = overlap_x + j
+                                factor = j / feathering
+                                outpaint_mask[0, :, pos, :] = factor * factor
+
+                        # Apply feathering at the top edge if needed
+                        if y > 0:
+                            for i in range(min(feathering, tile_height - overlap_y)):
+                                pos = overlap_y + i
+                                factor = i / feathering
+                                outpaint_mask[0, i, :, :] = factor * factor
 
                     if x > 0 or y > 0:  # If this isn't the first tile
                         # Copy the overlapping regions from previous tiles
@@ -191,51 +188,49 @@ class TiledImageGenerator:
                             # Mark these areas as "keep" in the mask
                             outpaint_mask[0, :top_overlap_height, :, :] = 0
 
-                    # 1. Get a properly sized empty latent shape
+                    # Get a properly sized empty latent shape
                     with torch.no_grad():
-                        latent_shape = vae.encode(working_tensor).shape
+                        latent_image = vae.encode(working_tensor)
 
-                    # 2. Create empty latent tensor with correct shape
-                    latent_image = torch.zeros(latent_shape, device=device)
+                    # Create a latent dictionary for common_ksampler
+                    latent_dict = {"samples": latent_image}
 
-                    # 3. Generate noise
-                    noise = comfy.sample.prepare_noise(latent_image, current_seed, None)
+                    # Properly reshape the mask for the VAE before setting it in the conditioning
+                    vae_mask = outpaint_mask.permute(0, 3, 1, 2)
 
-                    # 4. Create the latent mask (1 = generate, 0 = keep)
-                    mask_vae = outpaint_mask.permute(0, 3, 1, 2)
-                    latent_mask = torch.nn.functional.interpolate(
-                        mask_vae, size=(latent_shape[2], latent_shape[3]), mode="bilinear"
-                    )
+                    # Modify conditioning to include latent and mask
+                    inpaint_positive = self._conditioning_set_values(pos_cond, {
+                        "concat_latent_image": latent_image,
+                        "concat_mask": vae_mask,
+                        "guidance": flux_guidance  # Add guidance here again
+                    })
 
-                    # 5. Apply ControlNet to conditioning
-                    conditioning = self.apply_controlnet(
-                        positive=pos_cond,
-                        negative=neg_cond,
-                        control_net=original_controlnet,
-                        image=working_tensor,  # The image with content + black regions
-                        strength=controlnet_strength,
-                        start_percent=0.0,
-                        end_percent=1.0,
-                        vae=vae
-                    )
+                    inpaint_negative = self._conditioning_set_values(neg_cond, {
+                        "concat_latent_image": latent_image,
+                        "concat_mask": vae_mask,
+                        "guidance": flux_guidance  # Add guidance here again
+                    })
 
-                    # 6. Sample with the noise, empty latent, and mask
-                    samples = comfy.sample.sample(
+                    # Sample using common_ksampler for inpainting
+                    output = common_ksampler(
                         model,
-                        noise,
+                        current_seed,
                         steps,
                         cfg,
                         sampler_name,
                         scheduler,
-                        conditioning[0],
-                        conditioning[1],
-                        latent_image
+                        inpaint_positive,
+                        inpaint_negative,
+                        latent_dict,
+                        denoise=1.0
                     )
 
-                    # Decode
-                    tile_tensor = vae.decode(samples)
+                    latent_output = output[0]  # common_ksampler returns a tuple
 
-                # Store this tile
+                    # Decode
+                    tile_tensor = vae.decode(latent_output["samples"])
+
+                    # Store this tile
                 individual_tensors.append(tile_tensor.clone())
 
                 # Place the tile in the final composite
@@ -267,7 +262,7 @@ class TiledImageGenerator:
                 print(
                     f"Warning: Expected {expected_tiles} tile prompts, got {len(data)}. Proceeding with available data.")
 
-            # Extract the prompts in the correct order, with more flexible position handling
+            # Extract the prompts in the correct order
             tile_prompts = []
             for y in range(grid_height):
                 for x in range(grid_width):
@@ -306,13 +301,3 @@ class TiledImageGenerator:
             import traceback
             traceback.print_exc()
             raise ValueError(f"Error parsing JSON: {str(e)}")
-
-# This part is needed for ComfyUI to recognize the nodes
-NODE_CLASS_MAPPINGS = {
-    "TiledImageGenerator": TiledImageGenerator,
-}
-
-# Add descriptions for the web UI
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "TiledImageGenerator": "Tiled Image Generator (ControlNet Outpainting)",
-}
