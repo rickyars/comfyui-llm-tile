@@ -2,7 +2,7 @@ import json
 import torch
 import comfy.sample
 import comfy.controlnet
-
+from comfy.utils import ProgressBar
 
 class TiledImageGenerator:
     """
@@ -77,7 +77,8 @@ class TiledImageGenerator:
     def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative, grid_width, grid_height,
                              tile_width, tile_height, overlap_percent, seed,
                              model, clip, vae, steps, cfg,
-                             controlnet, controlnet_strength, sampler_name, scheduler):
+                             controlnet, controlnet_strength, sampler_name, scheduler,
+                             pbar=None):
         """Generate a tiled image composition with proper overlapping and seeding using ControlNet for outpainting."""
 
         # Parse the JSON tile prompts
@@ -104,6 +105,10 @@ class TiledImageGenerator:
 
         # Store a reference to the original controlnet - don't make copies
         original_controlnet = controlnet
+
+        # Calculate total number of tiles
+        total_tiles = grid_width * grid_height
+        pbar = ProgressBar(total_tiles)
 
         # Generate tiles one by one
         for y in range(grid_height):
@@ -243,6 +248,9 @@ class TiledImageGenerator:
                 w = min(tile_width, final_width - pos_x)
 
                 final_tensor[0, pos_y:pos_y + h, pos_x:pos_x + w, :] = tile_tensor[0, :h, :w, :]
+
+                # Update progress
+                pbar.update(1)
 
         # Combine the individual tile tensors into a batch
         if individual_tensors:
