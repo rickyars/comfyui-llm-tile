@@ -4,6 +4,8 @@ import comfy.sample
 import comfy.controlnet
 from comfy.utils import ProgressBar
 
+from .utils import gaussian_blend_tiles, parse_tile_prompts
+
 class TiledImageGenerator:
     """
     ComfyUI node that generates a tiled image composition with overlapping regions
@@ -24,6 +26,7 @@ class TiledImageGenerator:
                 "tile_width": ("INT", {"default": 1024, "min": 256, "max": 2048}),
                 "tile_height": ("INT", {"default": 1024, "min": 256, "max": 2048}),
                 "overlap_percent": ("FLOAT", {"default": 0.15, "min": 0.05, "max": 0.5, "step": 0.01}),
+                "blend_sigma": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
@@ -74,15 +77,14 @@ class TiledImageGenerator:
 
         return out[0], out[1]
 
-    def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative, grid_width, grid_height,
-                             tile_width, tile_height, overlap_percent, seed,
-                             model, clip, vae, steps, cfg,
-                             controlnet, controlnet_strength, sampler_name, scheduler,
-                             pbar=None):
+    def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative,
+                             grid_width, grid_height, tile_width, tile_height,
+                             overlap_percent, blend_sigma, controlnet, controlnet_strength,
+                             seed, model, clip, vae, sampler_name, scheduler, steps, cfg):
         """Generate a tiled image composition with proper overlapping and seeding using ControlNet for outpainting."""
 
-        # Parse the JSON tile prompts
-        tile_prompts = self._parse_tile_prompts(json_tile_prompts, grid_width, grid_height)
+        # Parse the JSON tile prompts using the utility function
+        tile_prompts = parse_tile_prompts(json_tile_prompts, grid_width, grid_height)
 
         # Calculate overlap in pixels
         overlap_x = int(tile_width * overlap_percent)
@@ -98,6 +100,7 @@ class TiledImageGenerator:
 
         # Storage for individual tiles
         individual_tensors = []
+        positions = []
 
         # Get device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -243,6 +246,9 @@ class TiledImageGenerator:
                 # Store this tile
                 individual_tensors.append(tile_tensor.clone())
 
+                # Store the position for blending
+                positions.append((pos_x, pos_y))
+
                 # Place the tile in the final composite
                 h = min(tile_height, final_height - pos_y)
                 w = min(tile_width, final_width - pos_x)
@@ -254,66 +260,25 @@ class TiledImageGenerator:
 
         # Combine the individual tile tensors into a batch
         if individual_tensors:
+            final_tensor = gaussian_blend_tiles(
+                individual_tensors,
+                positions,
+                tile_width,
+                tile_height,
+                overlap_x,
+                overlap_y,
+                final_width,
+                final_height,
+                sigma=blend_sigma
+            )
+
             tile_batch = torch.cat(individual_tensors, dim=0)
         else:
             # Fallback if no tiles were created
+            final_tensor = torch.zeros((1, final_height, final_width, 3), dtype=torch.float32)
             tile_batch = torch.zeros((1, tile_height, tile_width, 3), dtype=torch.float32, device=device)
 
         return final_tensor, tile_batch
-
-    def _parse_tile_prompts(self, json_string, grid_width, grid_height):
-        """Parse the JSON tile prompts with more flexible position handling."""
-        try:
-            data = json.loads(json_string)
-
-            # Validate the JSON structure
-            if not isinstance(data, list):
-                raise ValueError("JSON must contain a list of tile objects")
-
-            expected_tiles = grid_width * grid_height
-            if len(data) != expected_tiles:
-                print(
-                    f"Warning: Expected {expected_tiles} tile prompts, got {len(data)}. Proceeding with available data.")
-
-            # Extract the prompts in the correct order, with more flexible position handling
-            tile_prompts = []
-            for y in range(grid_height):
-                for x in range(grid_width):
-                    idx = y * grid_width + x
-                    if idx < len(data):
-                        tile_info = data[idx]
-
-                        # Check for required fields
-                        if "prompt" not in tile_info:
-                            raise ValueError(f"Tile at index {idx} is missing required 'prompt' field")
-
-                        # If position is missing or incorrect, print a warning but proceed
-                        if "position" not in tile_info:
-                            print(
-                                f"Warning: Tile at index {idx} is missing 'position' field. Using grid position ({x + 1},{y + 1}).")
-                        else:
-                            pos = tile_info["position"]
-                            expected_x = x + 1
-                            expected_y = y + 1
-                            if pos.get("x") != expected_x or pos.get("y") != expected_y:
-                                print(
-                                    f"Warning: Tile at index {idx} has position {pos} but expected ({expected_x},{expected_y}). Using prompt anyway.")
-
-                        tile_prompts.append(tile_info["prompt"])
-                    else:
-                        # If we're missing data, use a default prompt
-                        default_prompt = f"Generate content for tile at position ({x + 1},{y + 1})"
-                        print(f"Warning: Missing data for tile at index {idx}. Using default prompt.")
-                        tile_prompts.append(default_prompt)
-
-            return tile_prompts
-
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON format: {str(e)}")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise ValueError(f"Error parsing JSON: {str(e)}")
 
 # This part is needed for ComfyUI to recognize the nodes
 NODE_CLASS_MAPPINGS = {

@@ -42,8 +42,11 @@ This node was inspired by the "Tiled LLM composition" technique where an LLM (li
 
 - **grid_width/height**: Number of tiles in each dimension
 - **tile_width/height**: Size of each generated tile in pixels
-- **overlap_percent**: How much tiles should overlap (higher values create more seamless transitions)
-- **feathering**: Amount of gradient blending at tile edges
+- **overlap_percent**: How much tiles should overlap (0.0-0.5, recommended: 0.15-0.25)
+- **blend_sigma**: Controls the Gaussian blend smoothness (0.1-1.0):
+  - Lower values (0.1-0.3): Sharper transitions
+  - Medium values (0.4-0.6): Balanced blending for most content
+  - Higher values (0.7-1.0): Very gradual transitions for difficult content
 - **base_seed**: Starting seed for the generation sequence
 
 ## License
