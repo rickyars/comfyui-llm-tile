@@ -1,12 +1,15 @@
-from .node import TiledImageGenerator
-from .node_flux import TiledFluxGenerator
+"""
+LLM-Tile - Generate tiled compositions based on LLM-generated prompts
+"""
+from .node import NODE_CLASS_MAPPINGS as TILE_NCM, NODE_DISPLAY_NAME_MAPPINGS as TILE_NDCM
+# Import your new advanced node mappings
+from .node_advanced import NODE_CLASS_MAPPINGS as ADV_NCM, NODE_DISPLAY_NAME_MAPPINGS as ADV_NDCM
 
-NODE_CLASS_MAPPINGS = {
-    "TiledImageGenerator": TiledImageGenerator,
-    "TiledFluxGenerator": TiledFluxGenerator
-}
+# Combine all mappings (excluding the flux node)
+NODE_CLASS_MAPPINGS = {**TILE_NCM, **ADV_NCM}
+NODE_DISPLAY_NAME_MAPPINGS = {**TILE_NDCM, **ADV_NDCM}
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "TiledImageGenerator": "Tiled Image Generator (Improved)",
-    "TiledFluxGenerator": "Tiled Flux Generator (Inpainting)"
-}
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+
+# Version info
+__version__ = "0.2.0"  # Adjust version as needed

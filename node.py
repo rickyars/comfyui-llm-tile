@@ -1,10 +1,10 @@
-import json
 import torch
 import comfy.sample
 import comfy.controlnet
 from comfy.utils import ProgressBar
 
 from .utils import gaussian_blend_tiles, parse_tile_prompts
+from .utils import apply_controlnet_to_conditioning
 
 class TiledImageGenerator:
     """
@@ -44,38 +44,6 @@ class TiledImageGenerator:
     RETURN_NAMES = ("composite_image", "individual_tiles")
     FUNCTION = "generate_tiled_image"
     CATEGORY = "image/generation"
-
-    def apply_controlnet(self, positive, negative, control_net, image, strength, start_percent, end_percent, vae=None,
-                         extra_concat=[]):
-        if strength == 0:
-            return (positive, negative)
-
-        control_hint = image.movedim(-1, 1)
-        out = []
-
-        for conditioning in [positive, negative]:
-            c = []
-            for t in conditioning:
-                d = t[1].copy()
-                prev_cnet = d.get('control', None)
-
-                # Apply the controlnet directly without copying
-                # Create a temporary controlnet application that doesn't persist
-                temp_cnet = control_net.set_cond_hint(control_hint, strength,
-                                                      (start_percent, end_percent),
-                                                      vae=vae, extra_concat=extra_concat)
-
-                # Set previous controlnet but don't store in a dictionary
-                if prev_cnet is not None:
-                    temp_cnet.set_previous_controlnet(prev_cnet)
-
-                d['control'] = temp_cnet
-                d['control_apply_to_uncond'] = False
-                n = [t[0], d]
-                c.append(n)
-            out.append(c)
-
-        return out[0], out[1]
 
     def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative,
                              grid_width, grid_height, tile_width, tile_height,
@@ -209,14 +177,8 @@ class TiledImageGenerator:
                     # 3. Generate noise
                     noise = comfy.sample.prepare_noise(latent_image, current_seed, None)
 
-                    # 4. Create the latent mask (1 = generate, 0 = keep)
-                    mask_vae = outpaint_mask.permute(0, 3, 1, 2)
-                    latent_mask = torch.nn.functional.interpolate(
-                        mask_vae, size=(latent_shape[2], latent_shape[3]), mode="bilinear"
-                    )
-
                     # 5. Apply ControlNet to conditioning
-                    conditioning = self.apply_controlnet(
+                    conditioning = apply_controlnet_to_conditioning(
                         positive=pos_cond,
                         negative=neg_cond,
                         control_net=original_controlnet,
@@ -287,5 +249,5 @@ NODE_CLASS_MAPPINGS = {
 
 # Add descriptions for the web UI
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "TiledImageGenerator": "Tiled Image Generator (ControlNet Outpainting)",
+    "TiledImageGenerator": "Tiled Image Generator",
 }
