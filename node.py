@@ -133,51 +133,43 @@ class TiledImageGenerator:
                     tile_tensor = vae.decode(samples)
 
                 else:
-                    # For subsequent tiles, use outpainting with ControlNet Union
-
-                    # Create a completely black canvas for this tile
+                    # For subsequent tiles, use context from previous tiles
                     working_tensor = torch.zeros((1, tile_height, tile_width, 3), dtype=torch.float32)
-
-                    # Create a mask where 1 = areas to generate, 0 = keep black areas
                     outpaint_mask = torch.ones((1, tile_height, tile_width, 1), dtype=torch.float32)
 
-                    if x > 0 or y > 0:  # If this isn't the first tile
-                        # Copy the overlapping regions from previous tiles
-                        if x > 0:  # Left overlap
-                            left_overlap_width = overlap_x
-                            # Copy from the right edge of the previous tile
-                            working_tensor[0, :, :left_overlap_width, :] = final_tensor[
-                                                                           0,
-                                                                           pos_y:pos_y + tile_height,
-                                                                           pos_x:pos_x + left_overlap_width,
-                                                                           :
-                                                                           ]
-                            # Mark these areas as "keep" in the mask
-                            outpaint_mask[0, :, :left_overlap_width, :] = 0
+                    # Copy the overlapping regions from previous tiles
+                    if x > 0:  # Left overlap
+                        left_overlap_width = overlap_x
+                        # Copy from the right edge of the previous tile
+                        working_tensor[0, :, :left_overlap_width, :] = final_tensor[
+                                                                       0,
+                                                                       pos_y:pos_y + tile_height,
+                                                                       pos_x:pos_x + left_overlap_width,
+                                                                       :
+                                                                       ]
+                        # Mark these areas as "keep" in the mask
+                        outpaint_mask[0, :, :left_overlap_width, :] = 0
 
-                        if y > 0:  # Top overlap
-                            top_overlap_height = overlap_y
-                            # Copy from the bottom edge of the tile above
-                            working_tensor[0, :top_overlap_height, :, :] = final_tensor[
-                                                                           0,
-                                                                           pos_y:pos_y + top_overlap_height,
-                                                                           pos_x:pos_x + tile_width,
-                                                                           :
-                                                                           ]
-                            # Mark these areas as "keep" in the mask
-                            outpaint_mask[0, :top_overlap_height, :, :] = 0
+                    if y > 0:  # Top overlap
+                        top_overlap_height = overlap_y
+                        # Copy from the bottom edge of the tile above
+                        working_tensor[0, :top_overlap_height, :, :] = final_tensor[
+                                                                       0,
+                                                                       pos_y:pos_y + top_overlap_height,
+                                                                       pos_x:pos_x + tile_width,
+                                                                       :
+                                                                       ]
+                        # Mark these areas as "keep" in the mask
+                        outpaint_mask[0, :top_overlap_height, :, :] = 0
 
-                    # 1. Get a properly sized empty latent shape
+                    # Get a properly sized empty latent shape
                     with torch.no_grad():
                         latent_shape = vae.encode(working_tensor).shape
 
-                    # 2. Create empty latent tensor with correct shape
+                    # Create empty latent tensor with correct shape
                     latent_image = torch.zeros(latent_shape, device=device)
 
-                    # 3. Generate noise
-                    noise = comfy.sample.prepare_noise(latent_image, current_seed, None)
-
-                    # 5. Apply ControlNet to conditioning
+                    # Apply ControlNet to conditioning
                     conditioning = apply_controlnet_to_conditioning(
                         positive=pos_cond,
                         negative=neg_cond,
@@ -189,7 +181,10 @@ class TiledImageGenerator:
                         vae=vae
                     )
 
-                    # 6. Sample with the noise, empty latent, and mask
+                    # Generate noise
+                    noise = comfy.sample.prepare_noise(latent_image, current_seed, None)
+
+                    # Sample with the noise, empty latent, and mask
                     samples = comfy.sample.sample(
                         model,
                         noise,
@@ -214,7 +209,6 @@ class TiledImageGenerator:
                 # Place the tile in the final composite
                 h = min(tile_height, final_height - pos_y)
                 w = min(tile_width, final_width - pos_x)
-
                 final_tensor[0, pos_y:pos_y + h, pos_x:pos_x + w, :] = tile_tensor[0, :h, :w, :]
 
                 # Update progress
