@@ -44,7 +44,7 @@ class TiledImageGeneratorAdvanced:
                              tile_width, tile_height, overlap_percent, blend_sigma,
                              controlnet, controlnet_strength, seed, noise, guider,
                              sampler, sigmas, clip, vae):
-        """Generate a tiled image composition with proper overlapping and seeding using advanced sampling."""
+        """Generate a tiled image with uniform grown latents using advanced sampling."""
 
         # Parse the JSON tile prompts
         tile_prompts = parse_tile_prompts(json_tile_prompts, grid_width, grid_height)
@@ -53,15 +53,26 @@ class TiledImageGeneratorAdvanced:
         overlap_x = int(tile_width * overlap_percent)
         overlap_y = int(tile_height * overlap_percent)
 
-        # Calculate final image dimensions
-        final_width = tile_width + (grid_width - 1) * (tile_width - overlap_x)
-        final_height = tile_height + (grid_height - 1) * (tile_height - overlap_y)
+        # SIMPLE FINAL SIZE CALCULATION - exact grid multiplication
+        final_width = tile_width * grid_width
+        final_height = tile_height * grid_height
+
+        print(f"Final output size: {final_width} x {final_height}")
+        print(f"Tile size: {tile_width} x {tile_height}")
+        print(f"Grid: {grid_width} x {grid_height}")
+        print(f"Overlap: {overlap_x} x {overlap_y} pixels ({overlap_percent * 100}%)")
+
+        # UNIFORM GENERATION CANVAS SIZE for all tiles
+        gen_width = ((tile_width + overlap_x + 7) // 8) * 8
+        gen_height = ((tile_height + overlap_y + 7) // 8) * 8
+        print(f"Uniform generation canvas: {gen_width} x {gen_height}")
 
         # Create a blank canvas for the final composite
         final_tensor = torch.ones((1, final_height, final_width, 3), dtype=torch.float32) * 0.5
 
-        # Storage for individual tiles
-        individual_tensors = []
+        # Storage for individual tiles and full grown tiles
+        individual_tensors = []  # For blending (cropped)
+        full_grown_tensors = []  # For debugging (full canvas)
         positions = []
 
         # Get device
@@ -83,193 +94,175 @@ class TiledImageGeneratorAdvanced:
                 current_prompt = tile_prompts[idx]
                 current_seed = seed + idx
 
+                # Calculate position in the final image
+                final_pos_x = x * tile_width
+                final_pos_y = y * tile_height
+
                 print(f"Generating tile ({x + 1},{y + 1}) with prompt: {current_prompt}")
 
-                # Calculate position in the final image
-                pos_x = x * (tile_width - overlap_x)
-                pos_y = y * (tile_height - overlap_y)
+                # Create UNIFORM working canvas for ALL tiles
+                working_tensor = torch.zeros((1, gen_height, gen_width, 3), dtype=torch.float32)
+                outpaint_mask = torch.ones((1, gen_height, gen_width, 1), dtype=torch.float32)
 
-                # Use the original guider (no cloning)
-                tile_guider = guider
+                # Check if we have neighbors to copy from
+                has_left_neighbor = x > 0
+                has_top_neighbor = y > 0
 
-                # Before setting tile-specific conditions, save original method state
-                if hasattr(tile_guider, 'original_conds'):
-                    original_conds = tile_guider.original_conds.copy()
+                # COPY OVERLAP REGIONS from final_tensor (only if neighbors exist)
+                if has_left_neighbor:
+                    # Copy left overlap region from previous tile
+                    source_x = final_pos_x - overlap_x
+                    if source_x >= 0 and source_x + overlap_x <= final_width:
+                        source_start_y = final_pos_y
+                        source_end_y = min(final_pos_y + tile_height, final_height)
+                        source_height = source_end_y - source_start_y
 
-                # For first tile
-                if x == 0 and y == 0:
-                    # Standard sampling without mask
-                    latent_height = tile_height // 8
-                    latent_width = tile_width // 8
+                        # Copy to working tensor left edge (after top overlap region)
+                        target_start_y = overlap_y
+                        copy_height = min(source_height, gen_height - target_start_y)
 
-                    # Create an empty latent image
-                    latent_image = torch.zeros([1, 4, latent_height, latent_width], device=device)
+                        if copy_height > 0:
+                            working_tensor[0,
+                            target_start_y:target_start_y + copy_height,
+                            :overlap_x,
+                            :] = final_tensor[0,
+                                 source_start_y:source_start_y + copy_height,
+                                 source_x:source_x + overlap_x,
+                                 :]
+                            # Mark as "keep" in mask
+                            outpaint_mask[0,
+                            target_start_y:target_start_y + copy_height,
+                            :overlap_x,
+                            :] = 0
 
-                    # Generate the tile noise
-                    if noise is not None:
-                        # Use provided noise
-                        tile_noise = noise.generate_noise({"samples": latent_image})
+                if has_top_neighbor:
+                    # Copy top overlap region from previous tile
+                    source_y = final_pos_y - overlap_y
+                    if source_y >= 0 and source_y + overlap_y <= final_height:
+                        source_start_x = final_pos_x
+                        source_end_x = min(final_pos_x + tile_width, final_width)
+                        source_width = source_end_x - source_start_x
+
+                        # Copy to working tensor top edge (after left overlap region)
+                        target_start_x = overlap_x
+                        copy_width = min(source_width, gen_width - target_start_x)
+
+                        if copy_width > 0:
+                            working_tensor[0,
+                            :overlap_y,
+                            target_start_x:target_start_x + copy_width,
+                            :] = final_tensor[0,
+                                 source_y:source_y + overlap_y,
+                                 source_start_x:source_start_x + copy_width,
+                                 :]
+                            # Mark as "keep" in mask
+                            outpaint_mask[0,
+                            :overlap_y,
+                            target_start_x:target_start_x + copy_width,
+                            :] = 0
+
+                # Handle corner overlap if both neighbors exist
+                if has_left_neighbor and has_top_neighbor:
+                    corner_source_x = final_pos_x - overlap_x
+                    corner_source_y = final_pos_y - overlap_y
+                    if (corner_source_x >= 0 and corner_source_y >= 0 and
+                            corner_source_x + overlap_x <= final_width and
+                            corner_source_y + overlap_y <= final_height):
+                        working_tensor[0, :overlap_y, :overlap_x, :] = final_tensor[0,
+                                                                       corner_source_y:corner_source_y + overlap_y,
+                                                                       corner_source_x:corner_source_x + overlap_x,
+                                                                       :]
+                        outpaint_mask[0, :overlap_y, :overlap_x, :] = 0
+
+                # Get latent shape for the uniform grown canvas
+                with torch.no_grad():
+                    latent_shape = vae.encode(working_tensor).shape
+
+                # Create empty latent tensor with grown shape
+                latent_image = torch.zeros(latent_shape, device=device)
+
+                # Create tile-specific conditioning
+                if hasattr(clip, 'tokenize') and hasattr(clip, 'encode_from_tokens_scheduled'):
+                    # Encode the tile-specific prompt
+                    pos_tokens = clip.tokenize(current_prompt)
+                    pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
+
+                    # For negative, use empty or a default negative
+                    neg_tokens = clip.tokenize("")
+                    neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
+
+                    # Apply controlnet to conditioning if available
+                    if controlnet is not None and controlnet_strength > 0:
+                        # Apply controlnet using the utility function
+                        conditioning = apply_controlnet_to_conditioning(
+                            positive=pos_cond,
+                            negative=neg_cond,
+                            control_net=controlnet,
+                            image=working_tensor,
+                            strength=controlnet_strength,
+                            start_percent=0.0,
+                            end_percent=1.0,
+                            vae=vae
+                        )
+
+                        # Set the conditioning with ControlNet applied
+                        guider.set_conds(conditioning[0], conditioning[1])
                     else:
-                        # Create new noise
-                        tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
-
-                    # Create tile-specific conditioning - same approach as for subsequent tiles
-                    if hasattr(clip, 'tokenize') and hasattr(clip, 'encode_from_tokens_scheduled'):
-                        # Encode the tile-specific prompt
-                        pos_tokens = clip.tokenize(current_prompt)
-                        pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
-
-                        # For negative, we can use empty or a default negative
-                        neg_tokens = clip.tokenize("")
-                        neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
-
-                        # Apply controlnet as needed (usually not needed for first tile)
-                        if controlnet is not None and controlnet_strength > 0:
-                            # Apply controlnet
-                            conditioning = apply_controlnet_to_conditioning(
-                                positive=pos_cond,
-                                negative=neg_cond,
-                                control_net=controlnet,
-                                image=torch.zeros((1, tile_height, tile_width, 3), dtype=torch.float32),
-                                strength=controlnet_strength,
-                                start_percent=0.0,
-                                end_percent=1.0,
-                                vae=vae
-                            )
-                            tile_guider.set_conds(conditioning[0], conditioning[1])
-                        else:
-                            # No controlnet
-                            tile_guider.set_conds(pos_cond, neg_cond)
-                    else:
-                        print("Warning: CLIP model doesn't have required tokenize/encode methods")
-
-                    # Sample using the guider
-                    samples = tile_guider.sample(
-                        tile_noise,
-                        latent_image,
-                        sampler,
-                        sigmas,
-                        denoise_mask=None,
-                        disable_pbar=False,
-                        seed=current_seed
-                    )
-
-                    # Decode
-                    tile_tensor = vae.decode(samples)
-
+                        # Set conditioning without ControlNet
+                        guider.set_conds(pos_cond, neg_cond)
                 else:
-                    # For subsequent tiles, use context from previous tiles
-                    working_tensor = torch.zeros((1, tile_height, tile_width, 3), dtype=torch.float32)
-                    outpaint_mask = torch.ones((1, tile_height, tile_width, 1), dtype=torch.float32)
+                    print("Warning: CLIP model doesn't have required tokenize/encode methods")
 
-                    # Copy the overlapping regions from previous tiles
-                    if x > 0:  # Left overlap
-                        left_overlap_width = overlap_x
-                        # Copy from the right edge of the previous tile
-                        working_tensor[0, :, :left_overlap_width, :] = final_tensor[
-                                                                       0,
-                                                                       pos_y:pos_y + tile_height,
-                                                                       pos_x:pos_x + left_overlap_width,
-                                                                       :
-                                                                       ]
-                        outpaint_mask[0, :, :left_overlap_width, :] = 0
+                # Generate the tile noise
+                if noise is not None:
+                    # Use provided noise
+                    tile_noise = noise.generate_noise({"samples": latent_image})
+                else:
+                    # Create new noise
+                    tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
 
-                    if y > 0:  # Top overlap
-                        top_overlap_height = overlap_y
-                        # Copy from the bottom edge of the tile above
-                        working_tensor[0, :top_overlap_height, :, :] = final_tensor[
-                                                                       0,
-                                                                       pos_y:pos_y + top_overlap_height,
-                                                                       pos_x:pos_x + tile_width,
-                                                                       :
-                                                                       ]
-                        outpaint_mask[0, :top_overlap_height, :, :] = 0
+                # Sample using the guider
+                samples = guider.sample(
+                    tile_noise,
+                    latent_image,
+                    sampler,
+                    sigmas,
+                    denoise_mask=None,
+                    disable_pbar=False,
+                    seed=current_seed
+                )
 
-                    # Get properly sized empty latent shape (like in node.py)
-                    with torch.no_grad():
-                        latent_shape = vae.encode(working_tensor).shape
+                # Decode the full grown canvas
+                full_grown_tensor = vae.decode(samples)
 
-                    # Create empty latent tensor with correct shape
-                    latent_image = torch.zeros(latent_shape, device=device)
+                # EXTRACT the tile_width x tile_height region from consistent position
+                # Always extract from overlap_x, overlap_y for uniform behavior
+                extract_x = overlap_x
+                extract_y = overlap_y
 
-                    # Get original conditioning from the tile-specific prompt
-                    if hasattr(clip, 'tokenize') and hasattr(clip, 'encode_from_tokens_scheduled'):
-                        # Encode the tile-specific prompt
-                        pos_tokens = clip.tokenize(current_prompt)
-                        pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
+                extracted_tile = full_grown_tensor[0:1,
+                                 extract_y:extract_y + tile_height,
+                                 extract_x:extract_x + tile_width,
+                                 :]
 
-                        # For negative, we can use empty or a default negative
-                        neg_tokens = clip.tokenize("")  # or use a standard negative prompt
-                        neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
+                # Store both versions
+                individual_tensors.append(extracted_tile.clone())  # For blending
+                full_grown_tensors.append(full_grown_tensor.clone())  # For debugging
+                positions.append((final_pos_x, final_pos_y))
 
-                        # Apply controlnet to conditioning if available
-                        if controlnet is not None and controlnet_strength > 0:
-                            # Apply controlnet using the utility function
-                            conditioning = apply_controlnet_to_conditioning(
-                                positive=pos_cond,
-                                negative=neg_cond,
-                                control_net=controlnet,
-                                image=working_tensor,
-                                strength=controlnet_strength,
-                                start_percent=0.0,
-                                end_percent=1.0,
-                                vae=vae
-                            )
-
-                            # Set the conditioning with ControlNet applied
-                            tile_guider.set_conds(conditioning[0], conditioning[1])
-                        else:
-                            # Set conditioning without ControlNet
-                            tile_guider.set_conds(pos_cond, neg_cond)
-                    else:
-                        print("Warning: CLIP model doesn't have required tokenize/encode methods")
-
-                    # Generate the tile noise
-                    if noise is not None:
-                        # Use provided noise
-                        tile_noise = noise.generate_noise({"samples": latent_image})
-                    else:
-                        # Create new noise
-                        tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
-
-                    # Sample using the guider - we're not using the mask here, relying on controlnet
-                    samples = tile_guider.sample(
-                        tile_noise,
-                        latent_image,
-                        sampler,
-                        sigmas,
-                        denoise_mask=None,  # USE the mask we created: outpaint_mask
-                        disable_pbar=False,
-                        seed=current_seed
-                    )
-
-                    # Decode
-                    tile_tensor = vae.decode(samples)
-
-                # After tile generation
-                if hasattr(tile_guider, 'original_conds') and 'original_conds' in locals():
-                    tile_guider.original_conds = original_conds
-                    # Force reset of the internal conds
-                    tile_guider.set_conds([], [])  # Reset with empty
-
-                # Store this tile
-                individual_tensors.append(tile_tensor.clone())
-
-                # Store the position for blending
-                positions.append((pos_x, pos_y))
-
-                # Place the tile in the final composite
-                h = min(tile_height, final_height - pos_y)
-                w = min(tile_width, final_width - pos_x)
-                final_tensor[0, pos_y:pos_y + h, pos_x:pos_x + w, :] = tile_tensor[0, :h, :w, :]
+                # Place the tile in the final composite at exact grid position
+                final_tensor[0,
+                final_pos_y:final_pos_y + tile_height,
+                final_pos_x:final_pos_x + tile_width,
+                :] = extracted_tile[0, :, :, :]
 
                 # Update progress
                 pbar.update(1)
 
-        # Combine the individual tile tensors into a batch with Gaussian blending
+        # Apply Gaussian blending for smooth transitions
         if individual_tensors:
             final_tensor = gaussian_blend_tiles(
-                individual_tensors,
+                individual_tensors,  # Use cropped tiles for blending
                 positions,
                 tile_width,
                 tile_height,
@@ -279,11 +272,11 @@ class TiledImageGeneratorAdvanced:
                 final_height,
                 sigma=blend_sigma
             )
-            tile_batch = torch.cat(individual_tensors, dim=0)
+            # Return full grown tiles for debugging
+            tile_batch = torch.cat(full_grown_tensors, dim=0)
         else:
-            # Fallback if no tiles were created
             final_tensor = torch.zeros((1, final_height, final_width, 3), dtype=torch.float32)
-            tile_batch = torch.zeros((1, tile_height, tile_width, 3), dtype=torch.float32, device=device)
+            tile_batch = torch.zeros((1, gen_height, gen_width, 3), dtype=torch.float32, device=device)
 
         return final_tensor, tile_batch
 
