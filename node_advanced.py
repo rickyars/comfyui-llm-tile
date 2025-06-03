@@ -3,8 +3,9 @@ import torch
 import comfy.sample
 from comfy.utils import ProgressBar
 
-from .utils import gaussian_blend_tiles, parse_tile_prompts
+from .utils import parse_tile_prompts
 from .utils import apply_controlnet_to_conditioning
+
 
 class TiledImageGeneratorAdvanced:
     """
@@ -44,7 +45,7 @@ class TiledImageGeneratorAdvanced:
                              tile_width, tile_height, overlap_percent, blend_sigma,
                              controlnet, controlnet_strength, seed, noise, guider,
                              sampler, sigmas, clip, vae):
-        """Generate a tiled image with uniform grown latents using advanced sampling."""
+        """Generate a tiled image with variable generation canvas sizes using advanced sampling."""
 
         # Parse the JSON tile prompts
         tile_prompts = parse_tile_prompts(json_tile_prompts, grid_width, grid_height)
@@ -53,7 +54,7 @@ class TiledImageGeneratorAdvanced:
         overlap_x = int(tile_width * overlap_percent)
         overlap_y = int(tile_height * overlap_percent)
 
-        # SIMPLE FINAL SIZE CALCULATION - exact grid multiplication
+        # Final size stays the same
         final_width = tile_width * grid_width
         final_height = tile_height * grid_height
 
@@ -62,18 +63,15 @@ class TiledImageGeneratorAdvanced:
         print(f"Grid: {grid_width} x {grid_height}")
         print(f"Overlap: {overlap_x} x {overlap_y} pixels ({overlap_percent * 100}%)")
 
-        # UNIFORM GENERATION CANVAS SIZE for all tiles
-        gen_width = ((tile_width + overlap_x + 7) // 8) * 8
-        gen_height = ((tile_height + overlap_y + 7) // 8) * 8
-        print(f"Uniform generation canvas: {gen_width} x {gen_height}")
+        # Define max generation canvas size for consistent debug storage
+        max_gen_width = ((tile_width + overlap_x + 7) // 8) * 8
+        max_gen_height = ((tile_height + overlap_y + 7) // 8) * 8
 
         # Create a blank canvas for the final composite
         final_tensor = torch.ones((1, final_height, final_width, 3), dtype=torch.float32) * 0.5
 
-        # Storage for individual tiles and full grown tiles
-        individual_tensors = []  # For blending (cropped)
-        full_grown_tensors = []  # For debugging (full canvas)
-        positions = []
+        # Storage for debugging (padded to consistent size)
+        full_grown_tensors = []
 
         # Get device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -98,9 +96,25 @@ class TiledImageGeneratorAdvanced:
                 final_pos_x = x * tile_width
                 final_pos_y = y * tile_height
 
+                # Calculate generation canvas size based on tile position
+                if x == 0 and y == 0:  # Top-left corner - no expansion needed
+                    gen_width = ((tile_width + 7) // 8) * 8
+                    gen_height = ((tile_height + 7) // 8) * 8
+                elif x == 0:  # Left column - only expand vertically for top neighbor
+                    gen_width = ((tile_width + 7) // 8) * 8
+                    gen_height = ((tile_height + overlap_y + 7) // 8) * 8
+                elif y == 0:  # Top row - only expand horizontally for left neighbor
+                    gen_width = ((tile_width + overlap_x + 7) // 8) * 8
+                    gen_height = ((tile_height + 7) // 8) * 8
+                else:  # Interior tiles - expand both directions
+                    gen_width = ((tile_width + overlap_x + 7) // 8) * 8
+                    gen_height = ((tile_height + overlap_y + 7) // 8) * 8
+
+                print(f"Tile ({x + 1},{y + 1}) generation canvas: {gen_width} x {gen_height}")
+
                 print(f"Generating tile ({x + 1},{y + 1}) with prompt: {current_prompt}")
 
-                # Create UNIFORM working canvas for ALL tiles
+                # Create working canvas with variable size
                 working_tensor = torch.zeros((1, gen_height, gen_width, 3), dtype=torch.float32)
                 outpaint_mask = torch.ones((1, gen_height, gen_width, 1), dtype=torch.float32)
 
@@ -117,8 +131,8 @@ class TiledImageGeneratorAdvanced:
                         source_end_y = min(final_pos_y + tile_height, final_height)
                         source_height = source_end_y - source_start_y
 
-                        # Copy to working tensor left edge (after top overlap region)
-                        target_start_y = overlap_y
+                        # Copy to working tensor left edge (after top overlap region if exists)
+                        target_start_y = overlap_y if has_top_neighbor else 0
                         copy_height = min(source_height, gen_height - target_start_y)
 
                         if copy_height > 0:
@@ -143,8 +157,8 @@ class TiledImageGeneratorAdvanced:
                         source_end_x = min(final_pos_x + tile_width, final_width)
                         source_width = source_end_x - source_start_x
 
-                        # Copy to working tensor top edge (after left overlap region)
-                        target_start_x = overlap_x
+                        # Copy to working tensor top edge (after left overlap region if exists)
+                        target_start_x = overlap_x if has_left_neighbor else 0
                         copy_width = min(source_width, gen_width - target_start_x)
 
                         if copy_width > 0:
@@ -174,11 +188,11 @@ class TiledImageGeneratorAdvanced:
                                                                        :]
                         outpaint_mask[0, :overlap_y, :overlap_x, :] = 0
 
-                # Get latent shape for the uniform grown canvas
+                # Get latent shape for the variable canvas
                 with torch.no_grad():
                     latent_shape = vae.encode(working_tensor).shape
 
-                # Create empty latent tensor with grown shape
+                # Create empty latent tensor with variable shape
                 latent_image = torch.zeros(latent_shape, device=device)
 
                 # Create tile-specific conditioning
@@ -232,51 +246,59 @@ class TiledImageGeneratorAdvanced:
                     seed=current_seed
                 )
 
-                # Decode the full grown canvas
-                full_grown_tensor = vae.decode(samples)
+                # Decode the variable canvas
+                original_tile = vae.decode(samples)[0]  # Remove batch dimension
 
-                # EXTRACT the tile_width x tile_height region from consistent position
-                # Always extract from overlap_x, overlap_y for uniform behavior
-                extract_x = overlap_x
-                extract_y = overlap_y
+                # Create padded version for debug output
+                padded_tensor = torch.zeros((max_gen_height, max_gen_width, 3),
+                                            dtype=original_tile.dtype, device=original_tile.device)
+                actual_h, actual_w = original_tile.shape[0], original_tile.shape[1]
 
-                extracted_tile = full_grown_tensor[0:1,
-                                 extract_y:extract_y + tile_height,
-                                 extract_x:extract_x + tile_width,
-                                 :]
+                # Position content consistently for debug viewing
+                if x == 0 and y == 0:
+                    padded_tensor[overlap_y:overlap_y + actual_h, overlap_x:overlap_x + actual_w, :] = original_tile
+                elif x == 0:
+                    padded_tensor[0:actual_h, overlap_x:overlap_x + actual_w, :] = original_tile
+                elif y == 0:
+                    padded_tensor[overlap_y:overlap_y + actual_h, 0:actual_w, :] = original_tile
+                else:
+                    padded_tensor[0:actual_h, 0:actual_w, :] = original_tile
 
-                # Store both versions
-                individual_tensors.append(extracted_tile.clone())  # For blending
-                full_grown_tensors.append(full_grown_tensor.clone())  # For debugging
-                positions.append((final_pos_x, final_pos_y))
+                full_grown_tensors.append(padded_tensor.unsqueeze(0))
 
-                # Place the tile in the final composite at exact grid position
-                final_tensor[0,
-                final_pos_y:final_pos_y + tile_height,
-                final_pos_x:final_pos_x + tile_width,
-                :] = extracted_tile[0, :, :, :]
+                # EXTRACT THE RIGHT 1024x1024 PORTION (NEW CONTENT) - TEMPORARY SIMPLE PLACEMENT
+                if x == 0 and y == 0:
+                    # First tile: use entire content (1024x1024)
+                    extracted_tile = original_tile[:tile_height, :tile_width, :]
+
+                elif x == 0:  # Left column
+                    # Skip top overlap (seeded), use bottom 1024x1024 (new content)
+                    start_y = original_tile.shape[0] - tile_height  # Bottom portion
+                    extracted_tile = original_tile[start_y:start_y + tile_height, :tile_width, :]
+
+                elif y == 0:  # Top row
+                    # Skip left overlap (seeded), use right 1024x1024 (new content)
+                    start_x = original_tile.shape[1] - tile_width  # Right portion
+                    extracted_tile = original_tile[:tile_height, start_x:start_x + tile_width, :]
+
+                else:  # Interior tiles
+                    # Skip both overlaps (seeded), use bottom-right 1024x1024 (new content)
+                    start_y = original_tile.shape[0] - tile_height  # Bottom portion
+                    start_x = original_tile.shape[1] - tile_width  # Right portion
+                    extracted_tile = original_tile[start_y:start_y + tile_height, start_x:start_x + tile_width, :]
+
+                # PLACE AT GRID POSITION (SIMPLE PLACEMENT FOR NOW)
+                final_tensor[0, final_pos_y:final_pos_y + tile_height, final_pos_x:final_pos_x + tile_width,
+                :] = extracted_tile
 
                 # Update progress
                 pbar.update(1)
 
-        # Apply Gaussian blending for smooth transitions
-        if individual_tensors:
-            final_tensor = gaussian_blend_tiles(
-                individual_tensors,  # Use cropped tiles for blending
-                positions,
-                tile_width,
-                tile_height,
-                overlap_x,
-                overlap_y,
-                final_width,
-                final_height,
-                sigma=blend_sigma
-            )
-            # Return full grown tiles for debugging
+        # Return final tensor and debug tiles
+        if full_grown_tensors:
             tile_batch = torch.cat(full_grown_tensors, dim=0)
         else:
-            final_tensor = torch.zeros((1, final_height, final_width, 3), dtype=torch.float32)
-            tile_batch = torch.zeros((1, gen_height, gen_width, 3), dtype=torch.float32, device=device)
+            tile_batch = torch.zeros((1, max_gen_height, max_gen_width, 3), dtype=torch.float32, device=device)
 
         return final_tensor, tile_batch
 
