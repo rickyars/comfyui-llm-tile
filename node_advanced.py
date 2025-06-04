@@ -23,7 +23,6 @@ class TiledImageGeneratorAdvanced:
                 "tile_width": ("INT", {"default": 1024, "min": 256, "max": 2048}),
                 "tile_height": ("INT", {"default": 1024, "min": 256, "max": 2048}),
                 "overlap_percent": ("FLOAT", {"default": 0.15, "min": 0.05, "max": 0.5, "step": 0.01}),
-                "blend_sigma": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "noise": ("NOISE",),
                 "guider": ("GUIDER",),
                 "sampler": ("SAMPLER",),
@@ -42,7 +41,7 @@ class TiledImageGeneratorAdvanced:
     CATEGORY = "image/generation"
 
     def generate_tiled_image(self, json_tile_prompts, grid_width, grid_height,
-                             tile_width, tile_height, overlap_percent, blend_sigma,
+                             tile_width, tile_height, overlap_percent,
                              controlnet, controlnet_strength, seed, noise, guider,
                              sampler, sigmas, clip, vae):
         """Generate a tiled image with variable generation canvas sizes using advanced sampling."""
