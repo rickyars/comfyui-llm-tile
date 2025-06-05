@@ -1,10 +1,10 @@
-import json
 import torch
 import comfy.sample
 from comfy.utils import ProgressBar
 
 from .utils import parse_tile_prompts
 from .utils import apply_controlnet_to_conditioning
+from .utils import combine_guider_conditioning, restore_guider_conditioning
 
 
 class TiledImageGeneratorAdvanced:
@@ -110,7 +110,6 @@ class TiledImageGeneratorAdvanced:
                     gen_height = ((tile_height + overlap_y + 7) // 8) * 8
 
                 print(f"Tile ({x + 1},{y + 1}) generation canvas: {gen_width} x {gen_height}")
-
                 print(f"Generating tile ({x + 1},{y + 1}) with prompt: {current_prompt}")
 
                 # Create working canvas with variable size
@@ -194,19 +193,27 @@ class TiledImageGeneratorAdvanced:
                 # Create empty latent tensor with variable shape
                 latent_image = torch.zeros(latent_shape, device=device)
 
-                # Create tile-specific conditioning
-                if hasattr(clip, 'tokenize') and hasattr(clip, 'encode_from_tokens_scheduled'):
-                    # Encode the tile-specific prompt
-                    pos_tokens = clip.tokenize(current_prompt)
-                    pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
+                # Combine tile prompt with existing guider conditioning
+                original_conditioning = combine_guider_conditioning(guider, current_prompt, clip)
 
-                    # For negative, use empty or a default negative
-                    neg_tokens = clip.tokenize("")
-                    neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
+                try:
+                    # Get current conditioning from guider and apply ControlNet
+                    guider_type = guider.__class__.__name__ if hasattr(guider, "__class__") else "Unknown"
+
+                    if guider_type == "CFGGuider" and hasattr(guider, 'positive_cond') and hasattr(guider,
+                                                                                                   'negative_cond'):
+                        pos_cond = guider.positive_cond
+                        neg_cond = guider.negative_cond
+                    elif hasattr(guider, 'conditioning'):
+                        pos_cond = guider.conditioning
+                        neg_cond = []
+                    else:
+                        print("Warning: Could not extract conditioning from guider")
+                        pos_cond = []
+                        neg_cond = []
 
                     # Apply controlnet to conditioning if available
                     if controlnet is not None and controlnet_strength > 0:
-                        # Apply controlnet using the utility function
                         conditioning = apply_controlnet_to_conditioning(
                             positive=pos_cond,
                             negative=neg_cond,
@@ -219,31 +226,33 @@ class TiledImageGeneratorAdvanced:
                         )
 
                         # Set the conditioning with ControlNet applied
-                        guider.set_conds(conditioning[0], conditioning[1])
+                        if guider_type == "CFGGuider":
+                            guider.set_conds(conditioning[0], conditioning[1])
+                        else:
+                            guider.set_conds(conditioning[0])
+
+                    # Generate the tile noise
+                    if noise is not None:
+                        # Use provided noise
+                        tile_noise = noise.generate_noise({"samples": latent_image})
                     else:
-                        # Set conditioning without ControlNet
-                        guider.set_conds(pos_cond, neg_cond)
-                else:
-                    print("Warning: CLIP model doesn't have required tokenize/encode methods")
+                        # Create new noise
+                        tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
 
-                # Generate the tile noise
-                if noise is not None:
-                    # Use provided noise
-                    tile_noise = noise.generate_noise({"samples": latent_image})
-                else:
-                    # Create new noise
-                    tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
+                    # Sample using the guider
+                    samples = guider.sample(
+                        tile_noise,
+                        latent_image,
+                        sampler,
+                        sigmas,
+                        denoise_mask=None,
+                        disable_pbar=False,
+                        seed=current_seed
+                    )
 
-                # Sample using the guider
-                samples = guider.sample(
-                    tile_noise,
-                    latent_image,
-                    sampler,
-                    sigmas,
-                    denoise_mask=None,
-                    disable_pbar=False,
-                    seed=current_seed
-                )
+                finally:
+                    # Always restore the original conditioning for the next tile
+                    restore_guider_conditioning(guider, original_conditioning)
 
                 # Decode the variable canvas
                 original_tile = vae.decode(samples)[0]  # Remove batch dimension
