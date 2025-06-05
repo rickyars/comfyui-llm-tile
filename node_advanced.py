@@ -193,66 +193,47 @@ class TiledImageGeneratorAdvanced:
                 # Create empty latent tensor with variable shape
                 latent_image = torch.zeros(latent_shape, device=device)
 
-                # Combine tile prompt with existing guider conditioning
-                original_conditioning = combine_guider_conditioning(guider, current_prompt, clip)
+                # Encode the tile prompt (like base node does)
+                pos_tokens = clip.tokenize(current_prompt)
+                pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
 
-                try:
-                    # Get current conditioning from guider and apply ControlNet
-                    guider_type = guider.__class__.__name__ if hasattr(guider, "__class__") else "Unknown"
+                # For now, use empty negative conditioning
+                neg_tokens = clip.tokenize("")
+                neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
 
-                    if guider_type == "CFGGuider" and hasattr(guider, 'positive_cond') and hasattr(guider,
-                                                                                                   'negative_cond'):
-                        pos_cond = guider.positive_cond
-                        neg_cond = guider.negative_cond
-                    elif hasattr(guider, 'conditioning'):
-                        pos_cond = guider.conditioning
-                        neg_cond = []
-                    else:
-                        print("Warning: Could not extract conditioning from guider")
-                        pos_cond = []
-                        neg_cond = []
+                # Apply ControlNet to conditioning
+                conditioning = apply_controlnet_to_conditioning(
+                    positive=pos_cond,
+                    negative=neg_cond,
+                    control_net=controlnet,
+                    image=working_tensor,
+                    strength=controlnet_strength,
+                    start_percent=0.0,
+                    end_percent=1.0,
+                    vae=vae
+                )
 
-                    # Apply controlnet to conditioning if available
-                    if controlnet is not None and controlnet_strength > 0:
-                        conditioning = apply_controlnet_to_conditioning(
-                            positive=pos_cond,
-                            negative=neg_cond,
-                            control_net=controlnet,
-                            image=working_tensor,
-                            strength=controlnet_strength,
-                            start_percent=0.0,
-                            end_percent=1.0,
-                            vae=vae
-                        )
+                # Set the conditioning on the guider
+                guider.set_conds(conditioning[0], conditioning[1])
 
-                        # Set the conditioning with ControlNet applied
-                        if guider_type == "CFGGuider":
-                            guider.set_conds(conditioning[0], conditioning[1])
-                        else:
-                            guider.set_conds(conditioning[0])
+                # Generate the tile noise
+                if noise is not None:
+                    # Use provided noise
+                    tile_noise = noise.generate_noise({"samples": latent_image})
+                else:
+                    # Create new noise
+                    tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
 
-                    # Generate the tile noise
-                    if noise is not None:
-                        # Use provided noise
-                        tile_noise = noise.generate_noise({"samples": latent_image})
-                    else:
-                        # Create new noise
-                        tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
-
-                    # Sample using the guider
-                    samples = guider.sample(
-                        tile_noise,
-                        latent_image,
-                        sampler,
-                        sigmas,
-                        denoise_mask=None,
-                        disable_pbar=False,
-                        seed=current_seed
-                    )
-
-                finally:
-                    # Always restore the original conditioning for the next tile
-                    restore_guider_conditioning(guider, original_conditioning)
+                # Sample using the guider
+                samples = guider.sample(
+                    tile_noise,
+                    latent_image,
+                    sampler,
+                    sigmas,
+                    denoise_mask=None,
+                    disable_pbar=False,
+                    seed=current_seed
+                )
 
                 # Decode the variable canvas
                 original_tile = vae.decode(samples)[0]  # Remove batch dimension
