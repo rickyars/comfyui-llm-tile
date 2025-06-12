@@ -1,0 +1,770 @@
+{
+  "id": "0160f950-85d0-473d-8187-055ffb593764",
+  "revision": 0,
+  "last_node_id": 51,
+  "last_link_id": 185,
+  "nodes": [
+    {
+      "id": 15,
+      "type": "ACN_ControlNet++LoaderSingle",
+      "pos": [
+        -510,
+        310
+      ],
+      "size": [
+        390,
+        90
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CONTROL_NET",
+          "type": "CONTROL_NET",
+          "slot_index": 0,
+          "links": [
+            155
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-advanced-controlnet",
+        "ver": "1.5.4",
+        "Node name for S&R": "ACN_ControlNet++LoaderSingle",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "sdxl\\controlnet++_union_sdxl.safetensors",
+        "inpaint/outpaint"
+      ]
+    },
+    {
+      "id": 50,
+      "type": "String",
+      "pos": [
+        -47.376251220703125,
+        444.2991943359375
+      ],
+      "size": [
+        400.88726806640625,
+        126.51927947998047
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "slot_index": 0,
+          "links": [
+            178
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyliterals",
+        "ver": "bdddb08ca82d90d75d97b1d437a652e0284a32ac",
+        "Node name for S&R": "String",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        ""
+      ],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 33,
+      "type": "SaveImage",
+      "pos": [
+        2240,
+        -10
+      ],
+      "size": [
+        315,
+        270
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 159
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.30",
+        "Node name for S&R": "SaveImage",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "deepseek"
+      ]
+    },
+    {
+      "id": 22,
+      "type": "Common Frame Dimensions [Dream]",
+      "pos": [
+        -440,
+        470
+      ],
+      "size": [
+        315,
+        238
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "final_width",
+          "type": "INT",
+          "slot_index": 2,
+          "links": []
+        },
+        {
+          "name": "final_height",
+          "type": "INT",
+          "slot_index": 3,
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-dream-project",
+        "ver": "5.1.2",
+        "Node name for S&R": "Common Frame Dimensions [Dream]",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "1280",
+        "1:1",
+        "tall",
+        "8",
+        64,
+        "ceil"
+      ]
+    },
+    {
+      "id": 18,
+      "type": "PreviewImage",
+      "pos": [
+        890,
+        -50
+      ],
+      "size": [
+        1280,
+        1280
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 158
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.26",
+        "Node name for S&R": "PreviewImage",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 36,
+      "type": "PreviewImage",
+      "pos": [
+        2250,
+        330
+      ],
+      "size": [
+        694.6666259765625,
+        742.0000610351562
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 160
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.30",
+        "Node name for S&R": "PreviewImage",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 28,
+      "type": "LoraLoader",
+      "pos": [
+        -516.45068359375,
+        -274.6759948730469
+      ],
+      "size": [
+        390,
+        126
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 131
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 132
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            181
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            182
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.26",
+        "Node name for S&R": "LoraLoader",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "sdxl\\AnalogRedmondV2-Analog-AnalogRedmAF.safetensors",
+        0.5000000000000001,
+        1
+      ]
+    },
+    {
+      "id": 2,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        -516.45068359375,
+        -434.6759948730469
+      ],
+      "size": [
+        390,
+        100
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            131
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            132
+          ]
+        },
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 2,
+          "links": [
+            154
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.26",
+        "Node name for S&R": "CheckpointLoaderSimple",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "sdxl\\juggernautXL_v9Rundiffusionphoto2.safetensors"
+      ]
+    },
+    {
+      "id": 51,
+      "type": "LoraLoader",
+      "pos": [
+        -515.3533325195312,
+        -87.7534408569336
+      ],
+      "size": [
+        390,
+        126
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 181
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 182
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            183
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            184
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.26",
+        "Node name for S&R": "LoraLoader",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "sdxl\\SDXL_MSPaint_Portrait.safetensors",
+        0.7000000000000002,
+        1
+      ]
+    },
+    {
+      "id": 23,
+      "type": "LoraLoader",
+      "pos": [
+        -517.0988159179688,
+        100.64799499511719
+      ],
+      "size": [
+        390,
+        126
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 183
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 184
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            172
+          ]
+        },
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 1,
+          "links": [
+            173
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.26",
+        "Node name for S&R": "LoraLoader",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "sdxl\\Moebius (Jean Giraud) Style.safetensors",
+        0.7000000000000002,
+        1
+      ]
+    },
+    {
+      "id": 49,
+      "type": "String",
+      "pos": [
+        -49.150901794433594,
+        238.4378662109375
+      ],
+      "size": [
+        405.3240051269531,
+        143.37872314453125
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "slot_index": 0,
+          "links": [
+            177
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyliterals",
+        "ver": "bdddb08ca82d90d75d97b1d437a652e0284a32ac",
+        "Node name for S&R": "String",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "Contemporary surrealist oil painting, bold color blocking with saturated purple and cream white, even atmospheric lighting, hyperrealistic technique, dramatic landscape composition, flat color planes, gallery exhibition quality"
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 35,
+      "type": "TiledImageGenerator",
+      "pos": [
+        420,
+        100
+      ],
+      "size": [
+        403.1999816894531,
+        584
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 172
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 173
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 154
+        },
+        {
+          "name": "controlnet",
+          "type": "CONTROL_NET",
+          "link": 155
+        },
+        {
+          "name": "json_tile_prompts",
+          "type": "STRING",
+          "widget": {
+            "name": "json_tile_prompts"
+          },
+          "link": 185
+        },
+        {
+          "name": "global_positive",
+          "type": "STRING",
+          "widget": {
+            "name": "global_positive"
+          },
+          "link": 177
+        },
+        {
+          "name": "global_negative",
+          "type": "STRING",
+          "widget": {
+            "name": "global_negative"
+          },
+          "link": 178
+        }
+      ],
+      "outputs": [
+        {
+          "name": "composite_image",
+          "type": "IMAGE",
+          "links": [
+            158,
+            159
+          ]
+        },
+        {
+          "name": "individual_tiles",
+          "type": "IMAGE",
+          "links": [
+            160
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "rickyars/comfyui-llm-tile",
+        "ver": "4964141fdb2f61c2db66f56208d29e092c9456e6",
+        "Node name for S&R": "TiledImageGenerator",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "",
+        "",
+        "",
+        6,
+        2,
+        1024,
+        1024,
+        0.25000000000000006,
+        0.8000000000000002,
+        "dpmpp_2m",
+        "karras",
+        20,
+        3.5,
+        702456031009099,
+        "randomize"
+      ]
+    },
+    {
+      "id": 48,
+      "type": "String",
+      "pos": [
+        -45.67439651489258,
+        -115.14305877685547
+      ],
+      "size": [
+        400,
+        296
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "slot_index": 0,
+          "links": [
+            185
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyliterals",
+        "ver": "bdddb08ca82d90d75d97b1d437a652e0284a32ac",
+        "Node name for S&R": "String",
+        "widget_ue_connectable": {}
+      },
+      "widgets_values": [
+        "[\n  {\n    \"position\": {\"x\": 1, \"y\": 1},\n    \"prompt\": \"Diverse crowd of protesters holding 'NO ICE RAIDS' signs and American flags, passionate expressions, some wearing masks, bright blue California sky with palm trees, LA freeway overpass visible in background with people watching from above\"\n  },\n  {\n    \"position\": {\"x\": 2, \"y\": 1},\n    \"prompt\": \"Dense crowd of protesters, mix of families and activists, signs reading 'FAMILIES BELONG TOGETHER', bright blue California sky with palm trees, LA freeway overpass visible in background with people watching from above\"\n  },\n  {\n    \"position\": {\"x\": 3, \"y\": 1},\n    \"prompt\": \"Burning white autonomous vehicle with thick black smoke billowing upward against bright blue California sky with palm trees, orange flames visible, shattered sensors and cameras, LA freeway overpass visible in background with people watching from above\"\n  },\n  {\n    \"position\": {\"x\": 4, \"y\": 1},\n    \"prompt\": \"Second burning autonomous vehicle with heavy smoke rising into bright blue California sky with palm trees, debris scattered on asphalt street, LA freeway overpass visible in background with people watching from above\"\n  },\n  {\n    \"position\": {\"x\": 5, \"y\": 1},\n    \"prompt\": \"Line of National Guard soldiers in full riot gear, tactical shields, helmets with visors, standing in formation, bright blue California sky with palm trees, LA freeway overpass visible in background with people watching from above\"\n  },\n  {\n    \"position\": {\"x\": 6, \"y\": 1},\n    \"prompt\": \"Extended line of National Guard soldiers in riot gear, military vehicles behind them, tactical formation, bright blue California sky with palm trees, LA freeway overpass visible in background with people watching from above\"\n  },\n  {\n    \"position\": {\"x\": 1, \"y\": 2},\n    \"prompt\": \"Ground level view of protesters' feet and lower bodies, dropped protest signs on asphalt, concrete street surface with yellow road markings\"\n  },\n  {\n    \"position\": {\"x\": 2, \"y\": 2},\n    \"prompt\": \"Asphalt street surface with scattered debris, protest flyers, concrete road with yellow center lines, urban street environment\"\n  },\n  {\n    \"position\": {\"x\": 3, \"y\": 2},\n    \"prompt\": \"Burning debris and melted plastic from autonomous vehicle on asphalt, twisted metal, concrete street surface with yellow road markings\"\n  },\n  {\n    \"position\": {\"x\": 4, \"y\": 2},\n    \"prompt\": \"More burning vehicle debris on asphalt street, charred autonomous vehicle parts, concrete road surface with yellow center lines\"\n  },\n  {\n    \"position\": {\"x\": 5, \"y\": 2},\n    \"prompt\": \"Military boots of National Guard soldiers standing on asphalt, tactical gear visible, concrete street surface with yellow road markings\"\n  },\n  {\n    \"position\": {\"x\": 6, \"y\": 2},\n    \"prompt\": \"More military boots and tactical gear on asphalt, riot shields touching ground, concrete street surface with yellow road markings\"\n  }\n]\n"
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    }
+  ],
+  "links": [
+    [
+      131,
+      2,
+      0,
+      28,
+      0,
+      "MODEL"
+    ],
+    [
+      132,
+      2,
+      1,
+      28,
+      1,
+      "CLIP"
+    ],
+    [
+      154,
+      2,
+      2,
+      35,
+      2,
+      "VAE"
+    ],
+    [
+      155,
+      15,
+      0,
+      35,
+      3,
+      "CONTROL_NET"
+    ],
+    [
+      158,
+      35,
+      0,
+      18,
+      0,
+      "IMAGE"
+    ],
+    [
+      159,
+      35,
+      0,
+      33,
+      0,
+      "IMAGE"
+    ],
+    [
+      160,
+      35,
+      1,
+      36,
+      0,
+      "IMAGE"
+    ],
+    [
+      172,
+      23,
+      0,
+      35,
+      0,
+      "MODEL"
+    ],
+    [
+      173,
+      23,
+      1,
+      35,
+      1,
+      "CLIP"
+    ],
+    [
+      177,
+      49,
+      0,
+      35,
+      5,
+      "STRING"
+    ],
+    [
+      178,
+      50,
+      0,
+      35,
+      6,
+      "STRING"
+    ],
+    [
+      181,
+      28,
+      0,
+      51,
+      0,
+      "MODEL"
+    ],
+    [
+      182,
+      28,
+      1,
+      51,
+      1,
+      "CLIP"
+    ],
+    [
+      183,
+      51,
+      0,
+      23,
+      0,
+      "MODEL"
+    ],
+    [
+      184,
+      51,
+      1,
+      23,
+      1,
+      "CLIP"
+    ],
+    [
+      185,
+      48,
+      0,
+      35,
+      4,
+      "STRING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.1,
+      "offset": [
+        469.3838729898948,
+        56.881455647344595
+      ]
+    },
+    "frontendVersion": "1.21.7",
+    "ue_links": [],
+    "links_added_by_ue": [],
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
