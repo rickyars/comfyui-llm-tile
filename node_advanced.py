@@ -32,6 +32,8 @@ class TiledImageGeneratorAdvanced:
                 "controlnet": ("CONTROL_NET",),
                 "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
+                "seamlessX": ("BOOLEAN", {"default": True, "tooltip": "If true, left/right of image will be seamless."}),
+                "seamlessY": ("BOOLEAN", {"default": False, "tooltip": "If true, top/bottom of image will be seamless."}),
             }
         }
 
@@ -43,7 +45,7 @@ class TiledImageGeneratorAdvanced:
     def generate_tiled_image(self, json_tile_prompts, grid_width, grid_height,
                              tile_width, tile_height, overlap_percent,
                              controlnet, controlnet_strength, seed, noise, guider,
-                             sampler, sigmas, clip, vae):
+                             sampler, sigmas, clip, vae, seamlessX, seamlessY):
         """Generate a tiled image with variable generation canvas sizes using advanced sampling."""
 
         # Parse the JSON tile prompts
@@ -146,6 +148,56 @@ class TiledImageGeneratorAdvanced:
                             target_start_y:target_start_y + copy_height,
                             :overlap_x,
                             :] = 0
+
+                # --- SEAMLESS WRAP: For last tile in row, also overlap from first tile in row ---
+                if seamlessX and x == grid_width - 1 and overlap_x > 0:
+                    # Wrap to first tile in this row
+                    wrap_source_x = 0
+                    wrap_target_x = gen_width - overlap_x
+                    source_start_y = final_pos_y
+                    source_end_y = min(final_pos_y + tile_height, final_height)
+                    source_height = source_end_y - source_start_y
+
+                    target_start_y = overlap_y if has_top_neighbor else 0
+                    copy_height = min(source_height, gen_height - target_start_y)
+
+                    if copy_height > 0 and wrap_target_x >= 0:
+                        working_tensor[0,
+                        target_start_y:target_start_y + copy_height,
+                        wrap_target_x:wrap_target_x + overlap_x,
+                        :] = final_tensor[0,
+                             source_start_y:source_start_y + copy_height,
+                             wrap_source_x:wrap_source_x + overlap_x,
+                             :]
+                        outpaint_mask[0,
+                        target_start_y:target_start_y + copy_height,
+                        wrap_target_x:wrap_target_x + overlap_x,
+                        :] = 0
+
+                # --- SEAMLESS WRAP: For last tile in column, also overlap from first tile in column ---
+                if seamlessY and y == grid_height - 1 and overlap_y > 0:
+                    # Wrap to first tile in this column
+                    wrap_source_y = 0
+                    wrap_target_y = gen_height - overlap_y
+                    source_start_x = final_pos_x
+                    source_end_x = min(final_pos_x + tile_width, final_width)
+                    source_width = source_end_x - source_start_x
+
+                    target_start_x = overlap_x if has_left_neighbor else 0
+                    copy_width = min(source_width, gen_width - target_start_x)
+
+                    if copy_width > 0 and wrap_target_y >= 0:
+                        working_tensor[0,
+                        wrap_target_y:wrap_target_y + overlap_y,
+                        target_start_x:target_start_x + copy_width,
+                        :] = final_tensor[0,
+                             wrap_source_y:wrap_source_y + overlap_y,
+                             source_start_x:source_start_x + copy_width,
+                             :]
+                        outpaint_mask[0,
+                        wrap_target_y:wrap_target_y + overlap_y,
+                        target_start_x:target_start_x + copy_width,
+                        :] = 0
 
                 if has_top_neighbor:
                     # Copy top overlap region from previous tile
@@ -282,6 +334,14 @@ class TiledImageGeneratorAdvanced:
 
                 # Update progress
                 pbar.update(1)
+
+        # Trim rightmost and bottom overlap for seamless wrap if enabled
+        if seamlessX and overlap_x > 0:
+            trimmed_width = final_width - overlap_x
+            final_tensor = final_tensor[:, :, :trimmed_width, :]
+        if seamlessY and overlap_y > 0:
+            trimmed_height = final_height - overlap_y
+            final_tensor = final_tensor[:, :trimmed_height, :, :]
 
         # Return final tensor and debug tiles
         if full_grown_tensors:
