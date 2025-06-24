@@ -32,8 +32,8 @@ class TiledImageGeneratorAdvanced:
                 "controlnet": ("CONTROL_NET",),
                 "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
-                "seamlessX": ("BOOLEAN", {"default": True, "tooltip": "If true, left/right of image will be seamless."}),
-                "seamlessY": ("BOOLEAN", {"default": False, "tooltip": "If true, top/bottom of image will be seamless."}),
+                "seamlessX": ("BOOLEAN", {"default": True, "tooltip": "If true, left/right of image will be seamless. (2+ tiles)"}),
+                "seamlessY": ("BOOLEAN", {"default": False, "tooltip": "If true, top/bottom of image will be seamless. (2+ tiles)"}),
             }
         }
 
