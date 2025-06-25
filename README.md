@@ -7,6 +7,7 @@ A ComfyUI node that generates tiled image compositions with overlapping regions.
 - Generate multi-tile image compositions with proper overlapping and seeding
 - Configure grid dimensions, tile sizes, and overlap percentages
 - Feathering options for smooth transitions between tiles
+- Create seamless tiled images in X or Y
 - Template generator for easier prompt creation
 
 ## Installation
@@ -48,7 +49,8 @@ This node was inspired by the "Tiled LLM composition" technique where an LLM (li
   - Medium values (0.4-0.6): Balanced blending for most content
   - Higher values (0.7-1.0): Very gradual transitions for difficult content
 - **base_seed**: Starting seed for the generation sequence
-
+- **seamlessX/seamlessY**: Make image edges seamless tiles in X or Y (Minimum of 2 tiles)
+  
 ## License
 
 MIT License
