@@ -29,11 +29,13 @@ class TiledImageGeneratorAdvanced:
                 "sigmas": ("SIGMAS",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
-                "controlnet": ("CONTROL_NET",),
-                "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
                 "seamlessX": ("BOOLEAN", {"default": True, "tooltip": "If true, left/right of image will be seamless. (2+ tiles)"}),
                 "seamlessY": ("BOOLEAN", {"default": False, "tooltip": "If true, top/bottom of image will be seamless. (2+ tiles)"}),
+            },
+            "optional": {
+                "controlnet": ("CONTROL_NET",),
+                "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
         }
 
@@ -44,8 +46,9 @@ class TiledImageGeneratorAdvanced:
 
     def generate_tiled_image(self, json_tile_prompts, grid_width, grid_height,
                              tile_width, tile_height, overlap_percent,
-                             controlnet, controlnet_strength, seed, noise, guider,
-                             sampler, sigmas, clip, vae, seamlessX, seamlessY):
+                             noise, guider, sampler, sigmas, clip, vae,
+                             seed, seamlessX, seamlessY,
+                             controlnet=None, controlnet_strength=0.7):
         """Generate a tiled image with variable generation canvas sizes using advanced sampling."""
 
         # Parse the JSON tile prompts
