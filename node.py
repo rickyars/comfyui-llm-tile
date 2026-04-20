@@ -30,8 +30,6 @@ class TiledImageGenerator:
                 "model": ("MODEL",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
-                "controlnet": ("CONTROL_NET",),
-                "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 100}),
@@ -39,6 +37,10 @@ class TiledImageGenerator:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
                 "seamlessX": ("BOOLEAN", {"default": True, "tooltip": "If true, side of image will be seamless. (2+ tiles)"}),
                 "seamlessY": ("BOOLEAN", {"default": False, "tooltip": "If true, top/bottom of image will be seamless. (2+ tiles)"}),
+            },
+            "optional": {
+                "controlnet": ("CONTROL_NET",),
+                "controlnet_strength": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
         }
 
@@ -49,8 +51,9 @@ class TiledImageGenerator:
 
     def generate_tiled_image(self, json_tile_prompts, global_positive, global_negative,
                              grid_width, grid_height, tile_width, tile_height,
-                             overlap_percent, controlnet, controlnet_strength,
-                             seed, model, clip, vae, sampler_name, scheduler, steps, cfg, seamlessX, seamlessY):
+                             overlap_percent, seed, model, clip, vae,
+                             sampler_name, scheduler, steps, cfg, seamlessX, seamlessY,
+                             controlnet=None, controlnet_strength=0.7):
         """Generate a tiled image with variable generation canvas sizes and simple placement."""
 
         # Parse the JSON tile prompts
