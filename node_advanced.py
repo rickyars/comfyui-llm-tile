@@ -241,12 +241,15 @@ class TiledImageGeneratorAdvanced:
                                                                        :]
                         outpaint_mask[0, :overlap_y, :overlap_x, :] = 0
 
-                # Get latent shape for the variable canvas
                 with torch.no_grad():
-                    latent_shape = vae.encode(working_tensor).shape
+                    latent_image = vae.encode(working_tensor).to(device)
 
-                # Create empty latent tensor with variable shape
-                latent_image = torch.zeros(latent_shape, device=device)
+                mask = outpaint_mask[:, :, :, 0]
+                latent_mask = torch.nn.functional.interpolate(
+                    mask.unsqueeze(1),
+                    size=(latent_image.shape[2], latent_image.shape[3]),
+                    mode='nearest'
+                ).squeeze(1).to(device)
 
                 # Encode the tile prompt (like base node does)
                 pos_tokens = clip.tokenize(current_prompt)
@@ -285,7 +288,7 @@ class TiledImageGeneratorAdvanced:
                     latent_image,
                     sampler,
                     sigmas,
-                    denoise_mask=None,
+                    denoise_mask=latent_mask,
                     disable_pbar=False,
                     seed=current_seed
                 )
