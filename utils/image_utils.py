@@ -1,5 +1,13 @@
 import numpy as np
 import torch
+import torch.nn.functional as F
+
+
+def resize_mask_to_latent(outpaint_mask, latent_h, latent_w, device=None):
+    """Resize outpaint_mask [1, H, W, 1] to latent space [1, latent_H, latent_W]."""
+    mask = outpaint_mask[:, :, :, 0]
+    result = F.interpolate(mask.unsqueeze(1), size=(latent_h, latent_w), mode='nearest').squeeze(1)
+    return result.to(device) if device is not None else result
 
 
 def gaussian_blend_tiles(tiles, positions, tile_width, tile_height, overlap_x, overlap_y, final_width, final_height,

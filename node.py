@@ -4,7 +4,7 @@ import comfy.controlnet
 from comfy.utils import ProgressBar
 
 from .utils import parse_tile_prompts
-from .utils import apply_controlnet_to_conditioning
+from .utils import apply_controlnet_to_conditioning, resize_mask_to_latent
 
 
 class TiledImageGenerator:
@@ -254,14 +254,8 @@ class TiledImageGenerator:
                 with torch.no_grad():
                     latent_image = vae.encode(working_tensor).to(device)
 
-                mask = outpaint_mask[:, :, :, 0]
-                latent_mask = torch.nn.functional.interpolate(
-                    mask.unsqueeze(1),
-                    size=(latent_image.shape[2], latent_image.shape[3]),
-                    mode='nearest'
-                ).squeeze(1).to(device)
+                latent_mask = resize_mask_to_latent(outpaint_mask, latent_image.shape[2], latent_image.shape[3], device)
 
-                # Apply ControlNet to conditioning using the variable canvas
                 conditioning = apply_controlnet_to_conditioning(
                     positive=pos_cond,
                     negative=neg_cond,
@@ -273,10 +267,7 @@ class TiledImageGenerator:
                     vae=vae
                 )
 
-                # Generate noise for variable canvas size
                 noise = comfy.sample.prepare_noise(latent_image, current_seed, None)
-
-                # Sample with the variable latent
                 samples = comfy.sample.sample(
                     model,
                     noise,
@@ -290,15 +281,12 @@ class TiledImageGenerator:
                     noise_mask=latent_mask
                 )
 
-                # Decode the variable canvas
-                original_tile = vae.decode(samples)[0]  # Remove batch dimension
+                original_tile = vae.decode(samples)[0]
 
-                # (1) CREATE PADDED VERSION FOR DEBUG OUTPUT
                 padded_tensor = torch.zeros((max_gen_height, max_gen_width, 3),
                                             dtype=original_tile.dtype, device=original_tile.device)
                 actual_h, actual_w = original_tile.shape[0], original_tile.shape[1]
 
-                # Position content consistently for debug viewing
                 if x == 0 and y == 0:
                     padded_tensor[overlap_y:overlap_y + actual_h, overlap_x:overlap_x + actual_w, :] = original_tile
                 elif x == 0:
@@ -310,32 +298,20 @@ class TiledImageGenerator:
 
                 full_grown_tensors.append(padded_tensor.unsqueeze(0))
 
-                # (2) EXTRACT THE RIGHT 1024x1024 PORTION (NEW CONTENT)
                 if x == 0 and y == 0:
-                    # First tile: use entire content (1024x1024)
                     extracted_tile = original_tile[:tile_height, :tile_width, :]
-
-                elif x == 0:  # Left column
-                    # Skip top overlap (seeded), use bottom 1024x1024 (new content)
-                    start_y = original_tile.shape[0] - tile_height  # Bottom portion
+                elif x == 0:
+                    start_y = original_tile.shape[0] - tile_height
                     extracted_tile = original_tile[start_y:start_y + tile_height, :tile_width, :]
-
-                elif y == 0:  # Top row
-                    # Skip left overlap (seeded), use right 1024x1024 (new content)
-                    start_x = original_tile.shape[1] - tile_width  # Right portion
+                elif y == 0:
+                    start_x = original_tile.shape[1] - tile_width
                     extracted_tile = original_tile[:tile_height, start_x:start_x + tile_width, :]
-
-                else:  # Interior tiles
-                    # Skip both overlaps (seeded), use bottom-right 1024x1024 (new content)
-                    start_y = original_tile.shape[0] - tile_height  # Bottom portion
-                    start_x = original_tile.shape[1] - tile_width  # Right portion
+                else:
+                    start_y = original_tile.shape[0] - tile_height
+                    start_x = original_tile.shape[1] - tile_width
                     extracted_tile = original_tile[start_y:start_y + tile_height, start_x:start_x + tile_width, :]
 
-                # (3) PLACE AT GRID POSITION (NO BLENDING FOR NOW)
-                final_tensor[0, final_pos_y:final_pos_y + tile_height, final_pos_x:final_pos_x + tile_width,
-                :] = extracted_tile
-
-                # Update progress
+                final_tensor[0, final_pos_y:final_pos_y + tile_height, final_pos_x:final_pos_x + tile_width, :] = extracted_tile
                 pbar.update(1)
 
         # Return final tensor and debug tiles

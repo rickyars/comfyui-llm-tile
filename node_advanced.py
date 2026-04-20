@@ -3,7 +3,7 @@ import comfy.sample
 from comfy.utils import ProgressBar
 
 from .utils import parse_tile_prompts
-from .utils import apply_controlnet_to_conditioning
+from .utils import apply_controlnet_to_conditioning, resize_mask_to_latent
 from .utils import combine_guider_conditioning, restore_guider_conditioning
 
 
@@ -72,7 +72,7 @@ class TiledImageGeneratorAdvanced:
         max_gen_height = ((tile_height + overlap_y + 7) // 8) * 8
 
         # Create a blank canvas for the final composite
-        final_tensor = torch.ones((1, final_height, final_width, 3), dtype=torch.float32) * 0.5
+        final_tensor = torch.full((1, final_height, final_width, 3), 0.5, dtype=torch.float32)
 
         # Storage for debugging (padded to consistent size)
         full_grown_tensors = []
@@ -251,14 +251,8 @@ class TiledImageGeneratorAdvanced:
                 with torch.no_grad():
                     latent_image = vae.encode(working_tensor).to(device)
 
-                mask = outpaint_mask[:, :, :, 0]
-                latent_mask = torch.nn.functional.interpolate(
-                    mask.unsqueeze(1),
-                    size=(latent_image.shape[2], latent_image.shape[3]),
-                    mode='nearest'
-                ).squeeze(1).to(device)
+                latent_mask = resize_mask_to_latent(outpaint_mask, latent_image.shape[2], latent_image.shape[3], device)
 
-                # Apply ControlNet to conditioning
                 conditioning = apply_controlnet_to_conditioning(
                     positive=pos_cond,
                     negative=neg_cond,
@@ -270,18 +264,13 @@ class TiledImageGeneratorAdvanced:
                     vae=vae
                 )
 
-                # Set the conditioning on the guider
                 guider.set_conds(conditioning[0], conditioning[1])
 
-                # Generate the tile noise
                 if noise is not None:
-                    # Use provided noise
                     tile_noise = noise.generate_noise({"samples": latent_image})
                 else:
-                    # Create new noise
                     tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
 
-                # Sample using the guider
                 samples = guider.sample(
                     tile_noise,
                     latent_image,
@@ -292,15 +281,12 @@ class TiledImageGeneratorAdvanced:
                     seed=current_seed
                 )
 
-                # Decode the variable canvas
-                original_tile = vae.decode(samples)[0]  # Remove batch dimension
+                original_tile = vae.decode(samples)[0]
 
-                # Create padded version for debug output
                 padded_tensor = torch.zeros((max_gen_height, max_gen_width, 3),
                                             dtype=original_tile.dtype, device=original_tile.device)
                 actual_h, actual_w = original_tile.shape[0], original_tile.shape[1]
 
-                # Position content consistently for debug viewing
                 if x == 0 and y == 0:
                     padded_tensor[overlap_y:overlap_y + actual_h, overlap_x:overlap_x + actual_w, :] = original_tile
                 elif x == 0:
@@ -312,25 +298,17 @@ class TiledImageGeneratorAdvanced:
 
                 full_grown_tensors.append(padded_tensor.unsqueeze(0))
 
-                # EXTRACT THE RIGHT 1024x1024 PORTION (NEW CONTENT) - TEMPORARY SIMPLE PLACEMENT
                 if x == 0 and y == 0:
-                    # First tile: use entire content (1024x1024)
                     extracted_tile = original_tile[:tile_height, :tile_width, :]
-
-                elif x == 0:  # Left column
-                    # Skip top overlap (seeded), use bottom 1024x1024 (new content)
-                    start_y = original_tile.shape[0] - tile_height  # Bottom portion
+                elif x == 0:
+                    start_y = original_tile.shape[0] - tile_height
                     extracted_tile = original_tile[start_y:start_y + tile_height, :tile_width, :]
-
-                elif y == 0:  # Top row
-                    # Skip left overlap (seeded), use right 1024x1024 (new content)
-                    start_x = original_tile.shape[1] - tile_width  # Right portion
+                elif y == 0:
+                    start_x = original_tile.shape[1] - tile_width
                     extracted_tile = original_tile[:tile_height, start_x:start_x + tile_width, :]
-
-                else:  # Interior tiles
-                    # Skip both overlaps (seeded), use bottom-right 1024x1024 (new content)
-                    start_y = original_tile.shape[0] - tile_height  # Bottom portion
-                    start_x = original_tile.shape[1] - tile_width  # Right portion
+                else:
+                    start_y = original_tile.shape[0] - tile_height
+                    start_x = original_tile.shape[1] - tile_width
                     extracted_tile = original_tile[start_y:start_y + tile_height, start_x:start_x + tile_width, :]
 
                 # PLACE AT GRID POSITION (SIMPLE PLACEMENT FOR NOW)

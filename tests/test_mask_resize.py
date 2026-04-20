@@ -1,15 +1,9 @@
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import torch
-import torch.nn.functional as F
-import pytest
-
-
-def resize_mask_to_latent(outpaint_mask, latent_h, latent_w):
-    mask = outpaint_mask[:, :, :, 0]
-    return F.interpolate(
-        mask.unsqueeze(1),
-        size=(latent_h, latent_w),
-        mode='nearest'
-    ).squeeze(1)
+from utils.image_utils import resize_mask_to_latent
 
 
 def test_output_shape():
