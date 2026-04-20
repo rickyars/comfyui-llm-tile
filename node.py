@@ -90,6 +90,13 @@ class TiledImageGenerator:
         total_tiles = grid_width * grid_height
         pbar = ProgressBar(total_tiles)
 
+        # Pre-encode all conditionings once — CLIP only needs to load once
+        neg_cond = clip.encode_from_tokens_scheduled(clip.tokenize(global_negative))
+        all_pos_conds = []
+        for tile_prompt in tile_prompts:
+            combined = f"{tile_prompt} {global_positive}" if global_positive else tile_prompt
+            all_pos_conds.append(clip.encode_from_tokens_scheduled(clip.tokenize(combined)))
+
         # Generate tiles one by one
         for y in range(grid_height):
             for x in range(grid_width):
@@ -116,18 +123,9 @@ class TiledImageGenerator:
                     gen_height = ((tile_height + overlap_y + 7) // 8) * 8
 
                 print(f"Tile ({x + 1},{y + 1}) generation canvas: {gen_width} x {gen_height}")
-
-                # Create the combined prompt
-                combined_prompt = f"{current_prompt} {global_positive}" if global_positive else current_prompt
                 print(f"Generating tile ({x + 1},{y + 1}) with prompt: {current_prompt}")
 
-                # Encode the combined prompt
-                pos_tokens = clip.tokenize(combined_prompt)
-                pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
-
-                # Encode the negative prompt
-                neg_tokens = clip.tokenize(global_negative)
-                neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
+                pos_cond = all_pos_conds[idx]
 
                 # Create working canvas with variable size
                 working_tensor = torch.zeros((1, gen_height, gen_width, 3), dtype=torch.float32)

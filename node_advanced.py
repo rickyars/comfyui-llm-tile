@@ -85,9 +85,14 @@ class TiledImageGeneratorAdvanced:
         total_tiles = grid_width * grid_height
         pbar = ProgressBar(total_tiles)
 
-        # Determine the guider type for proper handling
         guider_type = guider.__class__.__name__ if hasattr(guider, "__class__") else "Unknown"
         print(f"Using guider of type: {guider_type}")
+
+        # Pre-encode all conditionings once — CLIP only needs to load once
+        neg_cond = clip.encode_from_tokens_scheduled(clip.tokenize(""))
+        all_pos_conds = [
+            clip.encode_from_tokens_scheduled(clip.tokenize(p)) for p in tile_prompts
+        ]
 
         # Generate tiles one by one
         for y in range(grid_height):
@@ -116,6 +121,8 @@ class TiledImageGeneratorAdvanced:
 
                 print(f"Tile ({x + 1},{y + 1}) generation canvas: {gen_width} x {gen_height}")
                 print(f"Generating tile ({x + 1},{y + 1}) with prompt: {current_prompt}")
+
+                pos_cond = all_pos_conds[idx]
 
                 # Create working canvas with variable size
                 working_tensor = torch.zeros((1, gen_height, gen_width, 3), dtype=torch.float32)
@@ -250,14 +257,6 @@ class TiledImageGeneratorAdvanced:
                     size=(latent_image.shape[2], latent_image.shape[3]),
                     mode='nearest'
                 ).squeeze(1).to(device)
-
-                # Encode the tile prompt (like base node does)
-                pos_tokens = clip.tokenize(current_prompt)
-                pos_cond = clip.encode_from_tokens_scheduled(pos_tokens)
-
-                # For now, use empty negative conditioning
-                neg_tokens = clip.tokenize("")
-                neg_cond = clip.encode_from_tokens_scheduled(neg_tokens)
 
                 # Apply ControlNet to conditioning
                 conditioning = apply_controlnet_to_conditioning(
