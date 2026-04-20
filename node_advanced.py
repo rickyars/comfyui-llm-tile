@@ -249,9 +249,8 @@ class TiledImageGeneratorAdvanced:
                         outpaint_mask[0, :overlap_y, :overlap_x, :] = 0
 
                 with torch.no_grad():
-                    latent_image = vae.encode(working_tensor).to(device)
-
-                latent_mask = resize_mask_to_latent(outpaint_mask, latent_image.shape[2], latent_image.shape[3], device)
+                    latent_shape = vae.encode(working_tensor).shape
+                latent_image = torch.zeros(latent_shape, device=device)
 
                 conditioning = apply_controlnet_to_conditioning(
                     positive=pos_cond,
@@ -276,7 +275,7 @@ class TiledImageGeneratorAdvanced:
                     latent_image,
                     sampler,
                     sigmas,
-                    denoise_mask=latent_mask,
+                    denoise_mask=None,
                     disable_pbar=False,
                     seed=current_seed
                 )
