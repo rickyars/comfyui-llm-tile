@@ -10,6 +10,25 @@ def resize_mask_to_latent(outpaint_mask, latent_h, latent_w, device=None):
     return result.to(device) if device is not None else result
 
 
+def blend_tile_into_canvas(final_tensor, tile, pos_x, pos_y, overlap_x, overlap_y, has_left, has_top):
+    """Blend a tile into the canvas with linear feathering over overlap zones."""
+    tile_h, tile_w = tile.shape[0], tile.shape[1]
+    alpha = torch.ones(tile_h, tile_w, 1, dtype=torch.float32)
+
+    if has_left and overlap_x > 0:
+        ramp = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1)
+        alpha[:, :overlap_x, :] = torch.min(alpha[:, :overlap_x, :], ramp.expand(tile_h, -1, 1))
+
+    if has_top and overlap_y > 0:
+        ramp = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1)
+        alpha[:overlap_y, :, :] = torch.min(alpha[:overlap_y, :, :], ramp.expand(-1, tile_w, 1))
+
+    region = final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + tile_w, :]
+    final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + tile_w, :] = (
+        region * (1.0 - alpha) + tile.cpu() * alpha
+    )
+
+
 def gaussian_blend_tiles(tiles, positions, tile_width, tile_height, overlap_x, overlap_y, final_width, final_height,
                          sigma=0.4):
     """
