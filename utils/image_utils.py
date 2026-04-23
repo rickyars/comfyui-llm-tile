@@ -10,48 +10,51 @@ def resize_mask_to_latent(outpaint_mask, latent_h, latent_w, device=None):
     return result.to(device) if device is not None else result
 
 
-def blend_tile_into_canvas(final_tensor, tile, pos_x, pos_y, overlap_x, overlap_y, has_left, has_top):
+def blend_and_place_tile(canvas, generated_tile, pos_x, pos_y,
+                          tile_width, tile_height, overlap_x, overlap_y,
+                          has_left, has_top, controlnet_active):
     """
-    Blend a tile into the canvas with linear feathering over overlap zones.
+    Extract the new-content zone from generated_tile, crossfade the ControlNet-matched
+    overlap strips into the neighbor's already-placed edge, then hard-place the extracted zone.
 
-    Uses the neighbor's single edge pixel (not the full overlap strip) as the blend
-    start, so neighbor content is never echoed into the new tile's zone — eliminating
-    the double-seam artifact where the edge appears on both sides of the boundary.
+    generated_tile shape: [gen_h, gen_w, 3] where gen_h = tile_height + (overlap_y if has_top else 0)
+    and gen_w = tile_width + (overlap_x if has_left else 0), when controlnet_active is True.
+    Without ControlNet, gen_h = tile_height, gen_w = tile_width (no expansion).
     """
-    tile_h, tile_w = tile.shape[0], tile.shape[1]
-    tile_cpu = tile.cpu()
+    tile_cpu = generated_tile.cpu() if generated_tile.is_cuda else generated_tile
 
-    # Hard copy the full tile
-    final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + tile_w, :] = tile_cpu
+    start_x = (overlap_x if has_left else 0) if controlnet_active else 0
+    start_y = (overlap_y if has_top else 0) if controlnet_active else 0
+    extracted = tile_cpu[start_y:start_y + tile_height, start_x:start_x + tile_width, :]
 
-    # Left seam: fade from left neighbor's rightmost column into this tile's left edge
-    if has_left and overlap_x > 0:
-        left_edge = final_tensor[0, pos_y:pos_y + tile_h,
-                                  pos_x - 1:pos_x, :].clone()  # single column [H,1,3]
-        ramp = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1).expand(tile_h, -1, 1)
-        final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + overlap_x, :] = (
-            left_edge * (1.0 - ramp) + tile_cpu[:, :overlap_x, :] * ramp
-        )
+    if controlnet_active:
+        if has_left and overlap_x > 0:
+            matched_left = tile_cpu[start_y:start_y + tile_height, 0:overlap_x, :]
+            alpha = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1)
+            zone = canvas[0, pos_y:pos_y + tile_height, pos_x - overlap_x:pos_x, :].clone()
+            canvas[0, pos_y:pos_y + tile_height, pos_x - overlap_x:pos_x, :] = (
+                (1.0 - alpha) * zone + alpha * matched_left
+            )
 
-    # Top seam: fade from top neighbor's bottom row into this tile's top edge
-    if has_top and overlap_y > 0:
-        top_edge = final_tensor[0, pos_y - 1:pos_y,
-                                 pos_x:pos_x + tile_w, :].clone()  # single row [1,W,3]
-        ramp = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1).expand(-1, tile_w, 1)
-        final_tensor[0, pos_y:pos_y + overlap_y, pos_x:pos_x + tile_w, :] = (
-            top_edge * (1.0 - ramp) + tile_cpu[:overlap_y, :, :] * ramp
-        )
+        if has_top and overlap_y > 0:
+            matched_top = tile_cpu[0:overlap_y, start_x:start_x + tile_width, :]
+            alpha = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1)
+            zone = canvas[0, pos_y - overlap_y:pos_y, pos_x:pos_x + tile_width, :].clone()
+            canvas[0, pos_y - overlap_y:pos_y, pos_x:pos_x + tile_width, :] = (
+                (1.0 - alpha) * zone + alpha * matched_top
+            )
 
-    # Corner: fade from the single corner pixel diagonally into this tile's top-left
-    if has_left and has_top and overlap_x > 0 and overlap_y > 0:
-        corner_px = final_tensor[0, pos_y - 1:pos_y,
-                                  pos_x - 1:pos_x, :].clone()  # single pixel [1,1,3]
-        ramp_x = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1).expand(overlap_y, -1, 1)
-        ramp_y = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1).expand(-1, overlap_x, 1)
-        alpha_corner = torch.min(ramp_x, ramp_y)
-        final_tensor[0, pos_y:pos_y + overlap_y, pos_x:pos_x + overlap_x, :] = (
-            corner_px * (1.0 - alpha_corner) + tile_cpu[:overlap_y, :overlap_x, :] * alpha_corner
-        )
+        if has_left and has_top and overlap_x > 0 and overlap_y > 0:
+            matched_corner = tile_cpu[0:overlap_y, 0:overlap_x, :]
+            alpha_x = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1).expand(overlap_y, -1, 1)
+            alpha_y = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1).expand(-1, overlap_x, 1)
+            alpha = torch.min(alpha_x, alpha_y)
+            zone = canvas[0, pos_y - overlap_y:pos_y, pos_x - overlap_x:pos_x, :].clone()
+            canvas[0, pos_y - overlap_y:pos_y, pos_x - overlap_x:pos_x, :] = (
+                (1.0 - alpha) * zone + alpha * matched_corner
+            )
+
+    canvas[0, pos_y:pos_y + tile_height, pos_x:pos_x + tile_width, :] = extracted
 
 
 def gaussian_blend_tiles(tiles, positions, tile_width, tile_height, overlap_x, overlap_y, final_width, final_height,

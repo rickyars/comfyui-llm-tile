@@ -4,7 +4,7 @@ import comfy.controlnet
 from comfy.utils import ProgressBar
 
 from .utils import parse_tile_prompts
-from .utils import apply_controlnet_to_conditioning, blend_tile_into_canvas
+from .utils import apply_controlnet_to_conditioning, blend_and_place_tile
 
 
 class TiledImageGenerator:
@@ -192,11 +192,13 @@ class TiledImageGenerator:
                 extracted_tile = vae.decode(samples)[0][:tile_height, :tile_width, :]
                 individual_tiles.append(extracted_tile.unsqueeze(0))
 
-                blend_tile_into_canvas(
+                blend_and_place_tile(
                     final_tensor, extracted_tile,
-                    final_pos_x, final_pos_y,
-                    overlap_x, overlap_y,
-                    has_left_neighbor, has_top_neighbor
+                    pos_x=final_pos_x, pos_y=final_pos_y,
+                    tile_width=tile_width, tile_height=tile_height,
+                    overlap_x=overlap_x, overlap_y=overlap_y,
+                    has_left=has_left_neighbor, has_top=has_top_neighbor,
+                    controlnet_active=False
                 )
                 pbar.update(1)
 
