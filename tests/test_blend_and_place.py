@@ -48,19 +48,23 @@ def test_extraction_skips_top_overlap():
     assert canvas[0, 1024:2048, 0:1024, :].mean().item() == pytest.approx(0.7)
 
 
-def test_left_seam_blend_crossfades_into_neighbor_zone():
-    """Blend writes into canvas[pos_x-overlap_x:pos_x], not into the new tile zone."""
+def test_left_seam_blend_uses_alpha_ramp():
+    """Blend zone goes from canvas content (alpha=0) to matched zone (alpha=1)."""
     canvas = _canvas()
-    canvas[0, :, 870:1024, :] = 1.0       # tile1's right edge (white)
-    gen_tile = torch.ones(1024, 1178, 3)   # overlap zone matches neighbor (white)
-    gen_tile[:, 154:, :] = 0.5            # new content is grey
+    canvas[0, :, 870:1024, :] = 0.0   # tile1's right edge is black
+    gen_tile = torch.zeros(1024, 1178, 3)
+    gen_tile[:, :154, :] = 1.0         # overlap zone is white (perfect ControlNet match)
+    gen_tile[:, 154:, :] = 0.5         # new content is grey
     blend_and_place_tile(canvas, gen_tile, pos_x=1024, pos_y=0,
                          tile_width=1024, tile_height=1024,
                          overlap_x=154, overlap_y=0,
                          has_left=True, has_top=False,
                          controlnet_active=True)
-    # blend(1.0, 1.0) = 1.0 — neighbor zone unchanged when match is perfect
-    assert canvas[0, 0:1024, 870:1024, :].mean().item() == pytest.approx(1.0, abs=1e-4)
+    # At start of blend zone (x=870, alpha≈0): should be close to canvas value (0.0)
+    assert canvas[0, 0:1024, 870, :].mean().item() == pytest.approx(0.0, abs=0.02)
+    # At end of blend zone (x=1023, alpha≈1): should be close to matched value (1.0)
+    assert canvas[0, 0:1024, 1023, :].mean().item() == pytest.approx(1.0, abs=0.02)
+    # New content zone unchanged
     assert canvas[0, 0:1024, 1024:2048, :].mean().item() == pytest.approx(0.5, abs=1e-4)
 
 
@@ -74,3 +78,43 @@ def test_first_tile_no_neighbors():
                          has_left=False, has_top=False,
                          controlnet_active=True)
     assert canvas[0, 0:1024, 0:1024, :].mean().item() == pytest.approx(0.3)
+
+
+def test_top_seam_blend_uses_alpha_ramp():
+    """Top blend zone goes from canvas content (alpha=0) to matched zone (alpha=1)."""
+    canvas = _canvas()
+    canvas[0, 870:1024, :, :] = 0.0   # tile1's bottom edge is black
+    gen_tile = torch.zeros(1178, 1024, 3)
+    gen_tile[:154, :, :] = 1.0         # top overlap zone is white
+    gen_tile[154:, :, :] = 0.5         # new content is grey
+    blend_and_place_tile(canvas, gen_tile, pos_x=0, pos_y=1024,
+                         tile_width=1024, tile_height=1024,
+                         overlap_x=0, overlap_y=154,
+                         has_left=False, has_top=True,
+                         controlnet_active=True)
+    # Start of blend zone (y=870, alpha≈0): close to canvas value (0.0)
+    assert canvas[0, 870, 0:1024, :].mean().item() == pytest.approx(0.0, abs=0.02)
+    # End of blend zone (y=1023, alpha≈1): close to matched value (1.0)
+    assert canvas[0, 1023, 0:1024, :].mean().item() == pytest.approx(1.0, abs=0.02)
+    # New content placed correctly
+    assert canvas[0, 1024:2048, 0:1024, :].mean().item() == pytest.approx(0.5, abs=1e-4)
+
+
+def test_corner_blend_fires_with_both_neighbors():
+    """Corner zone blends from canvas corner into tile's matched corner."""
+    canvas = _canvas()
+    canvas[0, 870:1024, 870:1024, :] = 0.0   # corner zone is black
+    gen_tile = torch.zeros(1178, 1178, 3)
+    gen_tile[:154, :154, :] = 1.0             # matched corner is white
+    gen_tile[154:, 154:, :] = 0.5             # new content
+    blend_and_place_tile(canvas, gen_tile, pos_x=1024, pos_y=1024,
+                         tile_width=1024, tile_height=1024,
+                         overlap_x=154, overlap_y=154,
+                         has_left=True, has_top=True,
+                         controlnet_active=True)
+    # Corner start (y=870, x=870): alpha=0, should still be black (0.0)
+    assert canvas[0, 870, 870, :].mean().item() == pytest.approx(0.0, abs=0.02)
+    # Corner end diagonal (y=1023, x=1023): alpha=1, should be white (1.0)
+    assert canvas[0, 1023, 1023, :].mean().item() == pytest.approx(1.0, abs=0.02)
+    # New content
+    assert canvas[0, 1024:2048, 1024:2048, :].mean().item() == pytest.approx(0.5, abs=1e-4)

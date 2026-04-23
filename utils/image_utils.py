@@ -28,9 +28,10 @@ def blend_and_place_tile(canvas, generated_tile, pos_x, pos_y,
     extracted = tile_cpu[start_y:start_y + tile_height, start_x:start_x + tile_width, :]
 
     if controlnet_active:
+        device = canvas.device
         if has_left and overlap_x > 0:
             matched_left = tile_cpu[start_y:start_y + tile_height, 0:overlap_x, :]
-            alpha = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1)
+            alpha = torch.linspace(0.0, 1.0, overlap_x, device=device).view(1, overlap_x, 1)
             zone = canvas[0, pos_y:pos_y + tile_height, pos_x - overlap_x:pos_x, :].clone()
             canvas[0, pos_y:pos_y + tile_height, pos_x - overlap_x:pos_x, :] = (
                 (1.0 - alpha) * zone + alpha * matched_left
@@ -38,7 +39,7 @@ def blend_and_place_tile(canvas, generated_tile, pos_x, pos_y,
 
         if has_top and overlap_y > 0:
             matched_top = tile_cpu[0:overlap_y, start_x:start_x + tile_width, :]
-            alpha = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1)
+            alpha = torch.linspace(0.0, 1.0, overlap_y, device=device).view(overlap_y, 1, 1)
             zone = canvas[0, pos_y - overlap_y:pos_y, pos_x:pos_x + tile_width, :].clone()
             canvas[0, pos_y - overlap_y:pos_y, pos_x:pos_x + tile_width, :] = (
                 (1.0 - alpha) * zone + alpha * matched_top
@@ -46,9 +47,9 @@ def blend_and_place_tile(canvas, generated_tile, pos_x, pos_y,
 
         if has_left and has_top and overlap_x > 0 and overlap_y > 0:
             matched_corner = tile_cpu[0:overlap_y, 0:overlap_x, :]
-            alpha_x = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1).expand(overlap_y, -1, 1)
-            alpha_y = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1).expand(-1, overlap_x, 1)
-            alpha = torch.min(alpha_x, alpha_y)
+            alpha_x = torch.linspace(0.0, 1.0, overlap_x, device=device).view(1, overlap_x, 1)
+            alpha_y = torch.linspace(0.0, 1.0, overlap_y, device=device).view(overlap_y, 1, 1)
+            alpha = torch.min(alpha_x, alpha_y)  # broadcasts to [overlap_y, overlap_x, 1]
             zone = canvas[0, pos_y - overlap_y:pos_y, pos_x - overlap_x:pos_x, :].clone()
             canvas[0, pos_y - overlap_y:pos_y, pos_x - overlap_x:pos_x, :] = (
                 (1.0 - alpha) * zone + alpha * matched_corner
