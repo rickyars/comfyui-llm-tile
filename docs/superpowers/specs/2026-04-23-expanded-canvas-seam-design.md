@@ -131,6 +131,19 @@ Unchanged from current logic:
 
 ---
 
+## Resource Management
+
+Model loading/unloading between tiles is expensive and must be avoided. Rules for the generation loop:
+
+- **Latent shape**: compute mathematically as `(1, 4, gen_height // 8, gen_width // 8)` — never call `vae.encode(working_tensor)` just to probe shape.
+- **VAE**: call `vae.decode()` once per tile after sampling. Do not call `vae.encode()` inside the loop unless genuinely needed (it is not needed for this design).
+- **CLIP**: `clip.encode_from_tokens_scheduled()` must stay per-tile (different prompts), but call it only once per tile with the combined prompt. No double-encoding.
+- **ControlNet**: constructed once in `apply_controlnet_to_conditioning` per tile — this is unavoidable since the reference image changes each tile. Keep `controlnet_strength` computation outside the loop.
+- **Model / sampler**: do not create new sampler or model objects inside the loop. Pass the same `model` reference every tile.
+- **Tensors**: keep `final_tensor` on CPU. Move tile outputs to CPU immediately after `vae.decode()` to free VRAM before the next tile's sampling run.
+
+---
+
 ## Key Invariants
 
 - Final canvas is always `grid_width * tile_width × grid_height * tile_height` before seamless trim.
