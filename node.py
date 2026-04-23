@@ -9,9 +9,9 @@ from .utils import apply_controlnet_to_conditioning, blend_and_place_tile
 
 class TiledImageGenerator:
     """
-    ComfyUI node that generates a tiled image composition. Each tile generates at
-    exactly tile_width x tile_height. Neighbor overlap pixels are passed to ControlNet
-    as a reference image. Tiles are blended into the canvas with linear feathering.
+    Each tile generates at tile_width x tile_height (no ControlNet) or at an expanded
+    canvas of (tile_width + overlap_x) x (tile_height + overlap_y) when ControlNet is
+    active and neighbors exist, to allow seam crossfading.
     """
 
     @classmethod
@@ -140,6 +140,9 @@ class TiledImageGenerator:
                                 wrap_target_x:wrap_target_x + overlap_x, :
                             ] = final_tensor[0,
                                 source_start_y:source_start_y + copy_height, 0:overlap_x, :]
+                        elif copy_height > 0:
+                            print(f"Warning: seamlessX seam strip skipped for tile ({x+1},{y+1}) — "
+                                  f"wrap_target_x {wrap_target_x} + overlap_x {overlap_x} > gen_w8 {gen_w8}")
 
                     if seamlessY and y == grid_height - 1 and overlap_y > 0:
                         wrap_target_y = overlap_y + tile_height
@@ -154,6 +157,9 @@ class TiledImageGenerator:
                                 target_start_x:target_start_x + copy_width, :
                             ] = final_tensor[0,
                                 0:overlap_y, source_start_x:source_start_x + copy_width, :]
+                        elif copy_width > 0:
+                            print(f"Warning: seamlessY seam strip skipped for tile ({x+1},{y+1}) — "
+                                  f"wrap_target_y {wrap_target_y} + overlap_y {overlap_y} > gen_h8 {gen_h8}")
 
                     if has_top_neighbor:
                         source_y = final_pos_y - overlap_y
