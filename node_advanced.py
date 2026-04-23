@@ -4,7 +4,6 @@ from comfy.utils import ProgressBar
 
 from .utils import parse_tile_prompts
 from .utils import apply_controlnet_to_conditioning, blend_and_place_tile
-from .utils import combine_guider_conditioning, restore_guider_conditioning
 
 
 class TiledImageGeneratorAdvanced:
@@ -135,7 +134,7 @@ class TiledImageGeneratorAdvanced:
                                 wrap_target_x:wrap_target_x + overlap_x, :
                             ] = final_tensor[0,
                                 source_start_y:source_start_y + copy_height, 0:overlap_x, :]
-                        elif copy_height > 0:
+                        elif copy_height > 0 and grid_width > 1:
                             print(f"Warning: seamlessX seam strip skipped for tile ({x+1},{y+1}) — "
                                   f"wrap_target_x {wrap_target_x} + overlap_x {overlap_x} > gen_w8 {gen_w8}")
 
@@ -152,7 +151,7 @@ class TiledImageGeneratorAdvanced:
                                 target_start_x:target_start_x + copy_width, :
                             ] = final_tensor[0,
                                 0:overlap_y, source_start_x:source_start_x + copy_width, :]
-                        elif copy_width > 0:
+                        elif copy_width > 0 and grid_height > 1:
                             print(f"Warning: seamlessY seam strip skipped for tile ({x+1},{y+1}) — "
                                   f"wrap_target_y {wrap_target_y} + overlap_y {overlap_y} > gen_h8 {gen_h8}")
 
@@ -187,10 +186,7 @@ class TiledImageGeneratorAdvanced:
 
                 latent_image = torch.zeros((1, 4, gen_h8 // 8, gen_w8 // 8), device=device)
 
-                if noise is not None:
-                    tile_noise = noise.generate_noise({"samples": latent_image})
-                else:
-                    tile_noise = comfy.sample.prepare_noise(latent_image, current_seed)
+                tile_noise = noise.generate_noise({"samples": latent_image})
 
                 guider.set_conds(conditioning[0], conditioning[1])
                 samples = guider.sample(
