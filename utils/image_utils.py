@@ -11,22 +11,44 @@ def resize_mask_to_latent(outpaint_mask, latent_h, latent_w, device=None):
 
 
 def blend_tile_into_canvas(final_tensor, tile, pos_x, pos_y, overlap_x, overlap_y, has_left, has_top):
-    """Blend a tile into the canvas with linear feathering over overlap zones."""
+    """
+    Blend a tile into the canvas with linear feathering over overlap zones.
+    Reads actual neighbor edge content from the canvas rather than blending against zero.
+    """
     tile_h, tile_w = tile.shape[0], tile.shape[1]
-    alpha = torch.ones(tile_h, tile_w, 1, dtype=torch.float32)
+    tile_cpu = tile.cpu()
 
+    # Hard copy the full tile first
+    final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + tile_w, :] = tile_cpu
+
+    # Feather left seam: blend left neighbor's right edge with this tile's left edge
     if has_left and overlap_x > 0:
-        ramp = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1)
-        alpha[:, :overlap_x, :] = torch.min(alpha[:, :overlap_x, :], ramp.expand(tile_h, -1, 1))
+        neighbor_right = final_tensor[0, pos_y:pos_y + tile_h,
+                                      pos_x - overlap_x:pos_x, :].clone()
+        ramp = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1).expand(tile_h, -1, 1)
+        final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + overlap_x, :] = (
+            neighbor_right * (1.0 - ramp) + tile_cpu[:, :overlap_x, :] * ramp
+        )
 
+    # Feather top seam: blend top neighbor's bottom edge with this tile's top edge
     if has_top and overlap_y > 0:
-        ramp = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1)
-        alpha[:overlap_y, :, :] = torch.min(alpha[:overlap_y, :, :], ramp.expand(-1, tile_w, 1))
+        neighbor_bottom = final_tensor[0, pos_y - overlap_y:pos_y,
+                                       pos_x:pos_x + tile_w, :].clone()
+        ramp = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1).expand(-1, tile_w, 1)
+        final_tensor[0, pos_y:pos_y + overlap_y, pos_x:pos_x + tile_w, :] = (
+            neighbor_bottom * (1.0 - ramp) + tile_cpu[:overlap_y, :, :] * ramp
+        )
 
-    region = final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + tile_w, :]
-    final_tensor[0, pos_y:pos_y + tile_h, pos_x:pos_x + tile_w, :] = (
-        region * (1.0 - alpha) + tile.cpu() * alpha
-    )
+    # Corner: blend diagonally from corner neighbor's bottom-right into this tile's top-left
+    if has_left and has_top and overlap_x > 0 and overlap_y > 0:
+        corner_neighbor = final_tensor[0, pos_y - overlap_y:pos_y,
+                                       pos_x - overlap_x:pos_x, :].clone()
+        ramp_x = torch.linspace(0.0, 1.0, overlap_x).view(1, overlap_x, 1).expand(overlap_y, -1, 1)
+        ramp_y = torch.linspace(0.0, 1.0, overlap_y).view(overlap_y, 1, 1).expand(-1, overlap_x, 1)
+        alpha_corner = torch.min(ramp_x, ramp_y)
+        final_tensor[0, pos_y:pos_y + overlap_y, pos_x:pos_x + overlap_x, :] = (
+            corner_neighbor * (1.0 - alpha_corner) + tile_cpu[:overlap_y, :overlap_x, :] * alpha_corner
+        )
 
 
 def gaussian_blend_tiles(tiles, positions, tile_width, tile_height, overlap_x, overlap_y, final_width, final_height,
