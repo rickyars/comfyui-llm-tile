@@ -34,7 +34,7 @@ class LLMTileSequentialDetailer:
     RETURN_TYPES = ("LATENT",)
     RETURN_NAMES = ("refined_latent",)
     FUNCTION = "detail"
-    CATEGORY = "sampling/detailers"
+    CATEGORY = "image/generation"
 
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler, denoise, tile_size, overlap):
