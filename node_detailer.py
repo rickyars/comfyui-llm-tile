@@ -97,5 +97,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LLMTileSequentialDetailer": "LLM Tile Sequential Detailer",
+    "LLMTileSequentialDetailer": "Tiled Image Detailer",
 }
