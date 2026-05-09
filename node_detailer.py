@@ -47,7 +47,7 @@ class LLMTileSequentialDetailer:
         if overlap_l >= tile_l:
             overlap_l = tile_l // 2
             print(f"[LLMTileSequentialDetailer] Warning: overlap clamped to "
-                  f"{overlap_l * 8}px (must be < tile_size // 2)")
+                  f"{overlap_l * 8}px (overlap must be < tile_size)")
 
         cols, rows, start_x, start_y = _compute_center_grid(W, H, tile_l, overlap_l)
         stride = tile_l - overlap_l
