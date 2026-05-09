@@ -78,3 +78,22 @@ def test_center_anchored_grid():
             assert 0 <= x1 <= 125
             assert y1 <= y2 <= 256
             assert x1 <= x2 <= 125
+
+
+def test_feather_blend_latent_corner():
+    overlap_l = 4
+    # Simulate a 2x2 tile grid: top-left tile placed, now placing bottom-right at y1=4, x1=4
+    canvas = torch.zeros(1, 4, 16, 16)
+    canvas[:, :, 0:8, 0:8] = 1.0  # top-left tile region
+
+    refined = torch.full((1, 4, 8, 8), 0.5)
+
+    feather_blend_latent(canvas, refined, y1=4, x1=4, overlap_l=overlap_l,
+                         has_left=True, has_top=True)
+
+    # Corner point (y=4, x=4): both alpha_x=0 and alpha_y=0 → min=0 → old canvas value
+    assert canvas[0, 0, 4, 4].item() == pytest.approx(1.0, abs=1e-5)
+    # Diagonal point (y=7, x=7): both alpha_x=1 and alpha_y=1 → min=1 → full refined value
+    assert canvas[0, 0, 7, 7].item() == pytest.approx(0.5, abs=1e-5)
+    # Interior (y=8, x=8): hard-set to refined
+    assert canvas[0, 0, 8, 8].item() == pytest.approx(0.5, abs=1e-5)

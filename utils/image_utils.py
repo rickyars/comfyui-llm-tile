@@ -183,22 +183,22 @@ def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
 
     # Left overlap: ramp alpha 0→1 across overlap columns (old canvas → refined)
     if left_zone is not None and tile_w > overlap_l:
-        alpha = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, 1, overlap_l)
+        alpha = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, 1, overlap_l)
         canvas[:, :, y1:y1 + tile_h, x1:x1 + overlap_l] = (
             (1.0 - alpha) * left_zone + alpha * refined_cpu[:, :, :, :overlap_l]
         )
 
     # Top overlap: ramp alpha 0→1 across overlap rows (old canvas → refined)
     if top_zone is not None and tile_h > overlap_l:
-        alpha = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, overlap_l, 1)
+        alpha = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, overlap_l, 1)
         canvas[:, :, y1:y1 + overlap_l, x1:x1 + tile_w] = (
             (1.0 - alpha) * top_zone + alpha * refined_cpu[:, :, :overlap_l, :]
         )
 
     # Corner: min(alpha_x, alpha_y) for smooth 2D diagonal blend
     if corner_zone is not None and tile_w > overlap_l and tile_h > overlap_l:
-        alpha_x = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, 1, overlap_l)
-        alpha_y = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, overlap_l, 1)
+        alpha_x = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, 1, overlap_l)
+        alpha_y = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, overlap_l, 1)
         alpha = torch.min(
             alpha_x.expand(1, 1, overlap_l, overlap_l),
             alpha_y.expand(1, 1, overlap_l, overlap_l),
