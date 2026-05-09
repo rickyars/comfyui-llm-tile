@@ -154,3 +154,71 @@ def gaussian_blend_tiles(tiles, positions, tile_width, tile_height, overlap_x, o
     final_tensor = torch.where(mask, final_tensor / weight_accumulator, final_tensor)
 
     return final_tensor
+
+
+def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
+    """
+    Write a refined latent tile into canvas with linear feathering on overlap edges.
+
+    canvas:   [B, C, H, W] CPU tensor being assembled in-place
+    refined:  [B, C, tile_h, tile_w] sampler output (moved to CPU internally)
+    y1, x1:   top-left insertion corner in canvas coordinates
+    overlap_l: overlap width/height in latent pixels
+    has_left:  True when a previously placed tile overlaps from the left
+    has_top:   True when a previously placed tile overlaps from above
+    """
+    _, _, tile_h, tile_w = refined.shape
+    refined_cpu = refined.cpu()
+
+    # Save existing canvas values in overlap zones before overwriting
+    left_zone = (canvas[:, :, y1:y1 + tile_h, x1:x1 + overlap_l].clone()
+                 if (has_left and overlap_l > 0) else None)
+    top_zone = (canvas[:, :, y1:y1 + overlap_l, x1:x1 + tile_w].clone()
+                if (has_top and overlap_l > 0) else None)
+    corner_zone = (canvas[:, :, y1:y1 + overlap_l, x1:x1 + overlap_l].clone()
+                   if (has_left and has_top and overlap_l > 0) else None)
+
+    # Hard-write the full refined tile
+    canvas[:, :, y1:y1 + tile_h, x1:x1 + tile_w] = refined_cpu
+
+    # Left overlap: ramp alpha 0→1 across overlap columns (old canvas → refined)
+    if left_zone is not None and tile_w > overlap_l:
+        alpha = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, 1, overlap_l)
+        canvas[:, :, y1:y1 + tile_h, x1:x1 + overlap_l] = (
+            (1.0 - alpha) * left_zone + alpha * refined_cpu[:, :, :, :overlap_l]
+        )
+
+    # Top overlap: ramp alpha 0→1 across overlap rows (old canvas → refined)
+    if top_zone is not None and tile_h > overlap_l:
+        alpha = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, overlap_l, 1)
+        canvas[:, :, y1:y1 + overlap_l, x1:x1 + tile_w] = (
+            (1.0 - alpha) * top_zone + alpha * refined_cpu[:, :, :overlap_l, :]
+        )
+
+    # Corner: min(alpha_x, alpha_y) for smooth 2D diagonal blend
+    if corner_zone is not None and tile_w > overlap_l and tile_h > overlap_l:
+        alpha_x = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, 1, overlap_l)
+        alpha_y = torch.linspace(0.0, 1.0, overlap_l).view(1, 1, overlap_l, 1)
+        alpha = torch.min(
+            alpha_x.expand(1, 1, overlap_l, overlap_l),
+            alpha_y.expand(1, 1, overlap_l, overlap_l),
+        )
+        canvas[:, :, y1:y1 + overlap_l, x1:x1 + overlap_l] = (
+            (1.0 - alpha) * corner_zone + alpha * refined_cpu[:, :, :overlap_l, :overlap_l]
+        )
+
+
+def _compute_center_grid(W, H, tile_l, overlap_l):
+    """
+    Compute a center-anchored tile grid for a latent of size W x H.
+
+    Returns (cols, rows, start_x, start_y). All values in latent-space pixels.
+    start_x / start_y may be negative when the image is narrower/shorter than
+    tile_l — clamp with max(0, ...) before use.
+    """
+    stride = tile_l - overlap_l
+    cols = max(1, (W - overlap_l) // stride)
+    rows = max(1, (H - overlap_l) // stride)
+    start_x = (W - (cols * stride + overlap_l)) // 2
+    start_y = (H - (rows * stride + overlap_l)) // 2
+    return cols, rows, start_x, start_y
