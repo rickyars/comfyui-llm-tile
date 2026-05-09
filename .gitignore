@@ -43,3 +43,6 @@ ENV/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Claude
+.superpowers
