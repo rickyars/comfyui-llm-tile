@@ -42,6 +42,44 @@ def _variances_to_denoise(variances, curve, denoise_min, denoise_max):
     return result
 
 
+def _t_to_rgb(t):
+    """
+    Map t∈[0,1] to RGB via HSV hue sweep (S=1, V=1).
+    t=0 → blue (hue=240°), t=0.5 → green (hue=120°), t=1 → red (hue=0°).
+    """
+    hue = (1.0 - t) * 240.0   # degrees: 0=red, 120=green, 240=blue
+    h = hue / 60.0
+    i = int(h) % 6
+    f = h - int(h)
+    q = 1.0 - f
+    segments = [
+        (1.0, f,   0.0),  # 0: red→yellow
+        (q,   1.0, 0.0),  # 1: yellow→green
+        (0.0, 1.0, f  ),  # 2: green→cyan
+        (0.0, q,   1.0),  # 3: cyan→blue
+        (f,   0.0, 1.0),  # 4: blue→magenta
+        (1.0, 0.0, q  ),  # 5: magenta→red
+    ]
+    return segments[i]
+
+
+def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w):
+    """
+    tile_coords: list of (y1, x1, y2, x2) in latent space
+    t_values:    list of pre-curve normalized variance [0,1], one per tile
+    canvas_h, canvas_w: latent-space dimensions (pixel dims = these × 8)
+    Returns: IMAGE tensor [1, canvas_h*8, canvas_w*8, 3]
+    """
+    H, W = canvas_h * 8, canvas_w * 8
+    img = torch.zeros(1, H, W, 3)
+    for (y1, x1, y2, x2), t in zip(tile_coords, t_values):
+        r, g, b = _t_to_rgb(t)
+        img[0, y1 * 8:y2 * 8, x1 * 8:x2 * 8, 0] = r
+        img[0, y1 * 8:y2 * 8, x1 * 8:x2 * 8, 1] = g
+        img[0, y1 * 8:y2 * 8, x1 * 8:x2 * 8, 2] = b
+    return img
+
+
 class LLMAdaptiveTileDetailer:
 
     @classmethod

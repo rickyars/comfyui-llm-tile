@@ -62,3 +62,61 @@ def test_single_variance_returns_denoise_max():
     # Single tile → v_min == v_max → t=1.0 → denoise_max
     result = _variances_to_denoise([0.7], curve=1.5, denoise_min=0.05, denoise_max=0.35)
     assert result[0][1] == pytest.approx(0.35)
+
+
+from node_detailer_adaptive import _t_to_rgb, _build_denoise_map
+
+
+def test_t_to_rgb_zero_is_blue():
+    r, g, b = _t_to_rgb(0.0)
+    assert r == pytest.approx(0.0, abs=1e-5)
+    assert g == pytest.approx(0.0, abs=1e-5)
+    assert b == pytest.approx(1.0, abs=1e-5)
+
+
+def test_t_to_rgb_one_is_red():
+    r, g, b = _t_to_rgb(1.0)
+    assert r == pytest.approx(1.0, abs=1e-5)
+    assert g == pytest.approx(0.0, abs=1e-5)
+    assert b == pytest.approx(0.0, abs=1e-5)
+
+
+def test_t_to_rgb_half_is_green():
+    r, g, b = _t_to_rgb(0.5)
+    assert r == pytest.approx(0.0, abs=1e-5)
+    assert g == pytest.approx(1.0, abs=1e-5)
+    assert b == pytest.approx(0.0, abs=1e-5)
+
+
+def test_build_denoise_map_shape():
+    coords = [(0, 0, 4, 4)]
+    t_values = [0.5]
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4)
+    assert result.shape == (1, 32, 32, 3)
+
+
+def test_build_denoise_map_blue_for_t_zero():
+    coords = [(0, 0, 4, 4)]
+    t_values = [0.0]
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4)
+    assert result[0, 0, 0, 0].item() == pytest.approx(0.0, abs=1e-5)  # red=0
+    assert result[0, 0, 0, 2].item() == pytest.approx(1.0, abs=1e-5)  # blue=1
+
+
+def test_build_denoise_map_red_for_t_one():
+    coords = [(0, 0, 4, 4)]
+    t_values = [1.0]
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4)
+    assert result[0, 0, 0, 0].item() == pytest.approx(1.0, abs=1e-5)  # red=1
+    assert result[0, 0, 0, 2].item() == pytest.approx(0.0, abs=1e-5)  # blue=0
+
+
+def test_build_denoise_map_two_tiles_distinct_colors():
+    # top-left tile (t=0→blue), bottom-right tile (t=1→red)
+    coords = [(0, 0, 4, 4), (4, 4, 8, 8)]
+    t_values = [0.0, 1.0]
+    result = _build_denoise_map(coords, t_values, canvas_h=8, canvas_w=8)
+    # Top-left tile region — sample interior pixel (2*8, 2*8) = (16, 16)
+    assert result[0, 16, 16, 2].item() == pytest.approx(1.0, abs=1e-5)  # blue
+    # Bottom-right tile region — sample interior pixel (4*8+4, 4*8+4) = (36, 36)
+    assert result[0, 36, 36, 0].item() == pytest.approx(1.0, abs=1e-5)  # red
