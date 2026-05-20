@@ -157,7 +157,6 @@ class LLMAdaptiveTileDetailer:
                 y2 = min(H, y1 + tile_l)
                 x2 = min(W, x1 + tile_l)
                 if y2 <= y1 or x2 <= x1:
-                    pbar.update(1)
                     continue
 
                 t_val, tile_denoise = td_pairs[tile_idx]
