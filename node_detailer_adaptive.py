@@ -23,6 +23,25 @@ def _tile_variances(canvas, tile_coords):
     ]
 
 
+def _variances_to_denoise(variances, curve, denoise_min, denoise_max):
+    """
+    variances: list of float (one per tile)
+    curve: gamma exponent; >1 biases most tiles toward denoise_min
+    Returns: list of (t, denoise) tuples where
+      t      — pre-curve normalized variance in [0,1] (used for heatmap)
+      denoise — final per-tile denoise value
+    """
+    v_min = min(variances)
+    v_max = max(variances)
+    result = []
+    for v in variances:
+        t = 1.0 if v_max == v_min else (v - v_min) / (v_max - v_min)
+        t_curved = t ** curve
+        denoise = denoise_min + t_curved * (denoise_max - denoise_min)
+        result.append((t, denoise))
+    return result
+
+
 class LLMAdaptiveTileDetailer:
 
     @classmethod
