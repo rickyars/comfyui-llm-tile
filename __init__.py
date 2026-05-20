@@ -13,10 +13,11 @@ else:
     from .node_advanced import NODE_CLASS_MAPPINGS as ADV_NCM, NODE_DISPLAY_NAME_MAPPINGS as ADV_NDCM
     # Import detailer node mappings
     from .node_detailer import NODE_CLASS_MAPPINGS as DET_NCM, NODE_DISPLAY_NAME_MAPPINGS as DET_NDCM
+    from .node_detailer_adaptive import NODE_CLASS_MAPPINGS as ADET_NCM, NODE_DISPLAY_NAME_MAPPINGS as ADET_NDCM
 
     # Combine all mappings
-    NODE_CLASS_MAPPINGS = {**TILE_NCM, **ADV_NCM, **DET_NCM}
-    NODE_DISPLAY_NAME_MAPPINGS = {**TILE_NDCM, **ADV_NDCM, **DET_NDCM}
+    NODE_CLASS_MAPPINGS = {**TILE_NCM, **ADV_NCM, **DET_NCM, **ADET_NCM}
+    NODE_DISPLAY_NAME_MAPPINGS = {**TILE_NDCM, **ADV_NDCM, **DET_NDCM, **ADET_NDCM}
 
     __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
