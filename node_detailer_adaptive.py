@@ -5,9 +5,9 @@ import comfy.samplers
 from comfy.utils import ProgressBar
 
 # Support both relative imports (in package) and direct imports (in tests)
-try:
+if __package__:
     from .utils import feather_blend_latent, _compute_center_grid
-except ImportError:
+else:
     from utils import feather_blend_latent, _compute_center_grid
 
 
