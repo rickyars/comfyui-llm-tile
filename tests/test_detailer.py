@@ -65,12 +65,12 @@ def test_full_coverage_grid():
     # ceil((256-128)/120) = ceil(1.07) = 2
     assert rows == 2
 
-    # Collect all tile coordinates
+    # Collect all tile coordinates using even-distribution formula
     all_x, all_y = set(), set()
     for r in range(rows + 1):
         for c in range(cols + 1):
-            y1 = min(r * stride, max(0, 256 - 128))
-            x1 = min(c * stride, max(0, 125 - 128))
+            x1 = round(c * max(0, 125 - 128) / cols) if cols > 0 else 0
+            y1 = round(r * (256 - 128) / rows) if rows > 0 else 0
             y2 = min(256, y1 + 128)
             x2 = min(125, x1 + 128)
             assert 0 <= x1 and x2 <= 125, f"x out of bounds: {x1}:{x2}"

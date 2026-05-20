@@ -136,8 +136,8 @@ class LLMAdaptiveTileDetailer:
         tile_coords = []
         for r in range(rows + 1):
             for c in range(cols + 1):
-                y1 = min(r * stride, max(0, H - tile_l))
-                x1 = min(c * stride, max(0, W - tile_l))
+                x1 = round(c * (W - tile_l) / cols) if cols > 0 else 0
+                y1 = round(r * (H - tile_l) / rows) if rows > 0 else 0
                 y2 = min(H, y1 + tile_l)
                 x2 = min(W, x1 + tile_l)
                 if y2 > y1 and x2 > x1:
@@ -152,8 +152,8 @@ class LLMAdaptiveTileDetailer:
         tile_idx = 0
         for r in range(rows + 1):
             for c in range(cols + 1):
-                y1 = min(r * stride, max(0, H - tile_l))
-                x1 = min(c * stride, max(0, W - tile_l))
+                x1 = round(c * (W - tile_l) / cols) if cols > 0 else 0
+                y1 = round(r * (H - tile_l) / rows) if rows > 0 else 0
                 y2 = min(H, y1 + tile_l)
                 x2 = min(W, x1 + tile_l)
                 if y2 <= y1 or x2 <= x1:
