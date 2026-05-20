@@ -125,7 +125,7 @@ class LLMAdaptiveTileDetailer:
             print(f"[LLMAdaptiveTileDetailer] Warning: overlap clamped to "
                   f"{overlap_l * 8}px (overlap must be < tile_size)")
 
-        cols, rows, start_x, start_y = _compute_center_grid(W, H, tile_l, overlap_l)
+        cols, rows = _compute_center_grid(W, H, tile_l, overlap_l)
         stride = tile_l - overlap_l
 
         print(f"[LLMAdaptiveTileDetailer] Latent {W}x{H} | "
@@ -136,8 +136,8 @@ class LLMAdaptiveTileDetailer:
         tile_coords = []
         for r in range(rows + 1):
             for c in range(cols + 1):
-                y1 = max(0, start_y + r * stride)
-                x1 = max(0, start_x + c * stride)
+                y1 = min(r * stride, max(0, H - tile_l))
+                x1 = min(c * stride, max(0, W - tile_l))
                 y2 = min(H, y1 + tile_l)
                 x2 = min(W, x1 + tile_l)
                 if y2 > y1 and x2 > x1:
@@ -152,8 +152,8 @@ class LLMAdaptiveTileDetailer:
         tile_idx = 0
         for r in range(rows + 1):
             for c in range(cols + 1):
-                y1 = max(0, start_y + r * stride)
-                x1 = max(0, start_x + c * stride)
+                y1 = min(r * stride, max(0, H - tile_l))
+                x1 = min(c * stride, max(0, W - tile_l))
                 y2 = min(H, y1 + tile_l)
                 x2 = min(W, x1 + tile_l)
                 if y2 <= y1 or x2 <= x1:

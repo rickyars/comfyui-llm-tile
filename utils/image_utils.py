@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -210,15 +212,21 @@ def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
 
 def _compute_center_grid(W, H, tile_l, overlap_l):
     """
-    Compute a center-anchored tile grid for a latent of size W x H.
+    Compute a full-coverage tile grid anchored at (0, 0).
 
-    Returns (cols, rows, start_x, start_y). All values in latent-space pixels.
-    start_x / start_y may be negative when the image is narrower/shorter than
-    tile_l — clamp with max(0, ...) before use.
+    Returns (cols, rows) — number of strides in each axis.
+    Iterate c in range(cols+1), r in range(rows+1) for all tiles.
+
+    Tile positions (caller computes):
+        x1 = min(c * stride, max(0, W - tile_l))
+        y1 = min(r * stride, max(0, H - tile_l))
+        x2 = min(W, x1 + tile_l)
+        y2 = min(H, y1 + tile_l)
+
+    The last tile in each axis snaps to the canvas edge so coverage is
+    always 0→W and 0→H with no uncovered margins.
     """
     stride = tile_l - overlap_l
-    cols = max(1, (W - overlap_l) // stride)
-    rows = max(1, (H - overlap_l) // stride)
-    start_x = (W - (cols * stride + overlap_l)) // 2
-    start_y = (H - (rows * stride + overlap_l)) // 2
-    return cols, rows, start_x, start_y
+    cols = 0 if W <= tile_l else math.ceil((W - tile_l) / stride)
+    rows = 0 if H <= tile_l else math.ceil((H - tile_l) / stride)
+    return cols, rows

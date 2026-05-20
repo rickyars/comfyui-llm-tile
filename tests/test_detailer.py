@@ -54,30 +54,33 @@ def test_feather_blend_latent_top_edge():
         assert vals[i] >= vals[i + 1]
 
 
-def test_center_anchored_grid():
+def test_full_coverage_grid():
     # 1000x2048 portrait: latent W=125, H=256
     # tile_size=1024 → tile_l=128; overlap=64 → overlap_l=8
-    cols, rows, start_x, start_y = _compute_center_grid(W=125, H=256, tile_l=128, overlap_l=8)
-
-    assert cols == 1
-    assert rows == 2
-    # Image (125) is narrower than tile_l (128); centering goes slightly negative
-    assert start_x == -2
-    # 4 latent pixels of top/bottom padding: (256 - 248) // 2 = 4
-    assert start_y == 4
-
-    # All clamped tile coordinates must stay within latent bounds
+    cols, rows = _compute_center_grid(W=125, H=256, tile_l=128, overlap_l=8)
     stride = 128 - 8  # 120
+
+    # W=125 <= tile_l=128 → single column (cols=0)
+    assert cols == 0
+    # ceil((256-128)/120) = ceil(1.07) = 2
+    assert rows == 2
+
+    # Collect all tile coordinates
+    all_x, all_y = set(), set()
     for r in range(rows + 1):
         for c in range(cols + 1):
-            y1 = max(0, start_y + r * stride)
-            x1 = max(0, start_x + c * stride)
+            y1 = min(r * stride, max(0, 256 - 128))
+            x1 = min(c * stride, max(0, 125 - 128))
             y2 = min(256, y1 + 128)
             x2 = min(125, x1 + 128)
-            assert 0 <= y1 <= 256
-            assert 0 <= x1 <= 125
-            assert y1 <= y2 <= 256
-            assert x1 <= x2 <= 125
+            assert 0 <= x1 and x2 <= 125, f"x out of bounds: {x1}:{x2}"
+            assert 0 <= y1 and y2 <= 256, f"y out of bounds: {y1}:{y2}"
+            all_x.update(range(x1, x2))
+            all_y.update(range(y1, y2))
+
+    # Full coverage — no gaps
+    assert all_x == set(range(125)), "x axis not fully covered"
+    assert all_y == set(range(256)), "y axis not fully covered"
 
 
 def test_feather_blend_latent_corner():
