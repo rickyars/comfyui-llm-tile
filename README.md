@@ -141,6 +141,75 @@ Format:
 
 ---
 
+## Tiled detailers
+
+Two nodes for refining upscaled images tile by tile. Wire an upscaled latent into either node in place of a KSampler.
+
+---
+
+### Tiled Image Detailer
+
+Applies a single denoise value to every tile. Good starting point; use when the image content is fairly uniform or you want predictable, consistent refinement across the whole canvas.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `denoise` | 0.25 | Applied uniformly to every tile |
+| `tile_size` | 1024 | Tile size in pixels |
+| `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones to hide seams. |
+
+The tile grid anchors at the top-left corner and snaps the last tile in each row/column to the canvas edge, so every tile is full-size and the full canvas is covered.
+
+---
+
+### Adaptive Tiled Image Detailer
+
+Measures how much is happening in each tile before sampling it, then scales the denoise strength accordingly. Tiles with low spatial variance (flat skies, dark backgrounds, plain walls) get low denoise and are left largely untouched. Tiles with high spatial variance (faces, fur, fabric folds, strong contrast edges) get high denoise and are refined more aggressively.
+
+Outputs two things: the refined latent, and a denoise map — a heatmap image showing which tiles got which denoise value (blue = frozen, green = mid, red = fully refined).
+
+#### How it works
+
+**Pass 1** measures the latent-space variance of each tile before any sampling. Variance is computed over the spatial dimensions and averaged across channels. A flat gradient scores near zero; a face with strong chiaroscuro scores high.
+
+All tile variances are normalized to [0, 1] within the image (flattest tile = 0, most complex tile = 1), then mapped through the `curve` exponent, then scaled to [denoise\_min, denoise\_max].
+
+**Pass 2** runs the standard sampling loop with each tile's computed denoise value.
+
+#### Parameters
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `denoise_min` | 0.05 | Denoise applied to the flattest tile. Near zero freezes it. |
+| `denoise_max` | 0.35 | Denoise applied to the most complex tile. |
+| `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
+| `tile_size` | 1024 | Tile size in pixels |
+| `overlap` | 64 | Overlap between adjacent tiles in pixels |
+
+#### How `curve` works
+
+After normalizing variance to [0, 1], the node raises it to the power of `curve` before mapping to the denoise range:
+
+```
+t_curved = t ^ curve
+denoise  = denoise_min + t_curved × (denoise_max − denoise_min)
+```
+
+`t ^ curve` is still 0 at the flat end and 1 at the complex end — the endpoints are fixed. What changes is the shape of the distribution in between.
+
+**`curve = 1.0` (linear):** denoise scales evenly with variance. A tile at 50% variance gets 50% of the way between denoise\_min and denoise\_max.
+
+**`curve > 1.0` (e.g. 1.5, 2.0):** most tiles are pushed toward denoise\_min. Only the highest-variance tiles approach denoise\_max. Start here for the pseudo-mosaic effect — backgrounds and walls freeze, faces and edges pop. `1.5` is a reasonable default; `2.5+` is aggressive.
+
+**`curve < 1.0` (e.g. 0.5):** most tiles are pushed toward denoise\_max. More of the image gets significant refinement. Useful when you want broad sharpening with only slight restraint on the very flattest areas.
+
+Think of `curve` as a contrast control for the denoise distribution, not a global strength control. `denoise_min` and `denoise_max` set the floor and ceiling; `curve` sets how quickly the population of tiles rises from the floor.
+
+#### Edge cases
+
+If all tiles have identical variance (uniform image, or single-tile canvas), every tile gets `denoise_max`.
+
+---
+
 ## Installation
 
 ```bash
