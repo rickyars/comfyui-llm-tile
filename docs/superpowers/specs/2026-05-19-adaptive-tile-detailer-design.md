@@ -93,7 +93,9 @@ After Pass 1, construct a pixel-space IMAGE tensor `[1, H*8, W*8, 3]` filled bla
 - `t = 0.5` → green `[0, 1, 0]`
 - `t = 1.0` → red `[1, 0, 0]`
 
-Color is computed as linear HSV-style: hue = (1 - t) * 240° converted to RGB. Tile boundaries are at latent coordinates × 8.
+Color is computed as linear HSV-style: `hue = (1 - t) * 240°`, saturation = 1, value = 1, converted to RGB. Tile boundaries are at latent coordinates × 8.
+
+**Note:** The heatmap uses the pre-curve `t` (raw normalized variance), not `t_curved`. This shows where detail actually exists in the image, independent of the `curve` setting — making it the correct debug signal for tuning `denoise_min`/`denoise_max`.
 
 This output is a mosaic of colored rectangles, visually revealing the algorithm's complexity map before sampling begins.
 
