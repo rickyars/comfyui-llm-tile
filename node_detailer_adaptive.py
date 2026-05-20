@@ -114,7 +114,79 @@ class LLMAdaptiveTileDetailer:
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler,
                denoise_min, denoise_max, curve, tile_size, overlap):
-        raise NotImplementedError
+
+        canvas = upscaled_latent["samples"].clone()
+        _, _, H, W = canvas.shape
+
+        tile_l = tile_size // 8
+        overlap_l = overlap // 8
+        if overlap_l >= tile_l:
+            overlap_l = tile_l // 2
+            print(f"[LLMAdaptiveTileDetailer] Warning: overlap clamped to "
+                  f"{overlap_l * 8}px (overlap must be < tile_size)")
+
+        cols, rows, start_x, start_y = _compute_center_grid(W, H, tile_l, overlap_l)
+        stride = tile_l - overlap_l
+
+        print(f"[LLMAdaptiveTileDetailer] Latent {W}x{H} | "
+              f"tile_l={tile_l} overlap_l={overlap_l} stride={stride} | "
+              f"grid cols={cols} rows={rows} ({(rows+1)*(cols+1)} tiles)")
+
+        # --- Pass 1: collect valid tile coords and measure variance ---
+        tile_coords = []
+        for r in range(rows + 1):
+            for c in range(cols + 1):
+                y1 = max(0, start_y + r * stride)
+                x1 = max(0, start_x + c * stride)
+                y2 = min(H, y1 + tile_l)
+                x2 = min(W, x1 + tile_l)
+                if y2 > y1 and x2 > x1:
+                    tile_coords.append((y1, x1, y2, x2))
+
+        variances = _tile_variances(canvas, tile_coords)
+        td_pairs = _variances_to_denoise(variances, curve, denoise_min, denoise_max)
+        denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W)
+
+        # --- Pass 2: sample each tile with its computed denoise ---
+        pbar = ProgressBar(len(tile_coords))
+        tile_idx = 0
+        for r in range(rows + 1):
+            for c in range(cols + 1):
+                y1 = max(0, start_y + r * stride)
+                x1 = max(0, start_x + c * stride)
+                y2 = min(H, y1 + tile_l)
+                x2 = min(W, x1 + tile_l)
+                if y2 <= y1 or x2 <= x1:
+                    pbar.update(1)
+                    continue
+
+                t_val, tile_denoise = td_pairs[tile_idx]
+                var = variances[tile_idx]
+                tile_idx += 1
+
+                print(f"[LLMAdaptiveTileDetailer] tile ({r},{c}) "
+                      f"var={var:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
+
+                tile_seed = seed + r * (cols + 1) + c
+                tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
+
+                noise = comfy.sample.prepare_noise(tile_latent, tile_seed, None)
+                refined = comfy.sample.sample(
+                    model, noise, steps, cfg, sampler_name, scheduler,
+                    positive, negative, tile_latent,
+                    denoise=tile_denoise,
+                )
+
+                feather_blend_latent(
+                    canvas, refined, y1, x1, overlap_l,
+                    has_left=(x1 > 0),
+                    has_top=(y1 > 0),
+                )
+
+                comfy.model_management.soft_empty_cache()
+                pbar.update(1)
+
+        return ({"samples": canvas}, denoise_map_img)
 
 
 NODE_CLASS_MAPPINGS = {
