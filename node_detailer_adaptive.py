@@ -4,7 +4,23 @@ import comfy.model_management
 import comfy.samplers
 from comfy.utils import ProgressBar
 
-from .utils import feather_blend_latent, _compute_center_grid
+# Support both relative imports (in package) and direct imports (in tests)
+try:
+    from .utils import feather_blend_latent, _compute_center_grid
+except ImportError:
+    from utils import feather_blend_latent, _compute_center_grid
+
+
+def _tile_variances(canvas, tile_coords):
+    """
+    canvas: [B, C, H, W] latent tensor
+    tile_coords: list of (y1, x1, y2, x2) in latent space
+    Returns: list of float — per-tile spatial variance averaged across channels
+    """
+    return [
+        canvas[:, :, y1:y2, x1:x2].var(dim=[2, 3]).mean().item()
+        for (y1, x1, y2, x2) in tile_coords
+    ]
 
 
 class LLMAdaptiveTileDetailer:
