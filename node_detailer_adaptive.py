@@ -11,30 +11,37 @@ else:
     from utils import feather_blend_latent, _compute_center_grid
 
 
-def _tile_variances(canvas, tile_coords):
+def _tile_complexity(canvas, tile_coords):
     """
     canvas: [B, C, H, W] latent tensor
     tile_coords: list of (y1, x1, y2, x2) in latent space
-    Returns: list of float — per-tile spatial variance averaged across channels
+    Returns: list of float — mean absolute gradient magnitude per tile.
+
+    Uses gradient magnitude rather than variance so that edges (face contours,
+    hair, object boundaries) register as complex even when the interior is smooth.
+    Flat uniform regions (dark backgrounds, plain walls) return near zero.
     """
-    return [
-        canvas[:, :, y1:y2, x1:x2].var(dim=[2, 3]).mean().item()
-        for (y1, x1, y2, x2) in tile_coords
-    ]
+    result = []
+    for (y1, x1, y2, x2) in tile_coords:
+        tile = canvas[:, :, y1:y2, x1:x2]
+        dx = (tile[:, :, :, 1:] - tile[:, :, :, :-1]).abs().mean()
+        dy = (tile[:, :, 1:, :] - tile[:, :, :-1, :]).abs().mean()
+        result.append(((dx + dy) / 2).item())
+    return result
 
 
-def _variances_to_denoise(variances, curve, denoise_min, denoise_max):
+def _scores_to_denoise(scores, curve, denoise_min, denoise_max):
     """
-    variances: list of float (one per tile)
+    scores: list of float complexity values (one per tile)
     curve: gamma exponent; >1 biases most tiles toward denoise_min
     Returns: list of (t, denoise) tuples where
-      t      — pre-curve normalized variance in [0,1] (used for heatmap)
+      t      — pre-curve normalized score in [0,1] (used for heatmap)
       denoise — final per-tile denoise value
     """
-    v_min = min(variances)
-    v_max = max(variances)
+    v_min = min(scores)
+    v_max = max(scores)
     result = []
-    for v in variances:
+    for v in scores:
         t = 1.0 if v_max == v_min else (v - v_min) / (v_max - v_min)
         t_curved = t ** curve
         denoise = denoise_min + t_curved * (denoise_max - denoise_min)
@@ -75,20 +82,31 @@ def _t_to_rgb(t):
     return r0 + f * (r1 - r0), g0 + f * (g1 - g0), b0 + f * (b1 - b0)
 
 
-def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w):
+def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
     """
-    tile_coords: list of (y1, x1, y2, x2) in latent space
-    t_values:    list of pre-curve normalized variance [0,1], one per tile
+    tile_coords: list of (y1, x1, y2, x2) — used only to determine tile count
+    t_values:    list of pre-curve normalized score [0,1], one per tile
     canvas_h, canvas_w: latent-space dimensions (pixel dims = these × 8)
+    cols, rows: strides in each axis; grid is (cols+1) × (rows+1) tiles
     Returns: IMAGE tensor [1, canvas_h*8, canvas_w*8, 3]
+
+    Draws equal-size display cells (one per tile) rather than actual tile
+    footprints, so the last column/row never appears wider than the others.
     """
-    H, W = canvas_h * 8, canvas_w * 8
-    img = torch.zeros(1, H, W, 3)
-    for (y1, x1, y2, x2), t in zip(tile_coords, t_values):
+    H_px, W_px = canvas_h * 8, canvas_w * 8
+    img = torch.zeros(1, H_px, W_px, 3)
+    n_cols, n_rows = cols + 1, rows + 1
+    for idx, t in enumerate(t_values):
+        row = idx // n_cols
+        col = idx % n_cols
+        px0 = round(col * W_px / n_cols)
+        px1 = round((col + 1) * W_px / n_cols)
+        py0 = round(row * H_px / n_rows)
+        py1 = round((row + 1) * H_px / n_rows)
         r, g, b = _t_to_rgb(t)
-        img[0, y1 * 8:y2 * 8, x1 * 8:x2 * 8, 0] = r
-        img[0, y1 * 8:y2 * 8, x1 * 8:x2 * 8, 1] = g
-        img[0, y1 * 8:y2 * 8, x1 * 8:x2 * 8, 2] = b
+        img[0, py0:py1, px0:px1, 0] = r
+        img[0, py0:py1, px0:px1, 1] = g
+        img[0, py0:py1, px0:px1, 2] = b
     return img
 
 
@@ -155,9 +173,9 @@ class LLMAdaptiveTileDetailer:
                 if y2 > y1 and x2 > x1:
                     tile_coords.append((y1, x1, y2, x2))
 
-        variances = _tile_variances(canvas, tile_coords)
-        td_pairs = _variances_to_denoise(variances, curve, denoise_min, denoise_max)
-        denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W)
+        scores = _tile_complexity(canvas, tile_coords)
+        td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
+        denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows)
 
         # --- Pass 2: sample each tile with its computed denoise ---
         pbar = ProgressBar(len(tile_coords))
@@ -172,11 +190,11 @@ class LLMAdaptiveTileDetailer:
                     continue
 
                 t_val, tile_denoise = td_pairs[tile_idx]
-                var = variances[tile_idx]
+                score = scores[tile_idx]
                 tile_idx += 1
 
                 print(f"[LLMAdaptiveTileDetailer] tile ({r},{c}) "
-                      f"var={var:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
+                      f"grad={score:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
 
                 tile_seed = seed + r * (cols + 1) + c
                 tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
