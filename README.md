@@ -165,7 +165,7 @@ The tile grid anchors at the top-left corner and snaps the last tile in each row
 
 Measures how much is happening in each tile before sampling it, then scales the denoise strength accordingly. Tiles with low spatial variance (flat skies, dark backgrounds, plain walls) get low denoise and are left largely untouched. Tiles with high spatial variance (faces, fur, fabric folds, strong contrast edges) get high denoise and are refined more aggressively.
 
-Outputs two things: the refined latent, and a denoise map — a heatmap image showing which tiles got which denoise value (blue = frozen, green = mid, red = fully refined).
+Outputs two things: the refined latent, and a denoise map — a heatmap image showing which tiles got which denoise value using the viridis colormap (dark purple = frozen, teal = mid, yellow = fully refined).
 
 #### How it works
 

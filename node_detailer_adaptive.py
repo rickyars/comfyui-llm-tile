@@ -42,25 +42,37 @@ def _variances_to_denoise(variances, curve, denoise_min, denoise_max):
     return result
 
 
+try:
+    from matplotlib import cm as _mpl_cm
+    _viridis_fn = _mpl_cm.viridis
+except ImportError:
+    _viridis_fn = None
+
+_VIRIDIS_STOPS = [
+    (0.267, 0.005, 0.329),  # 0.00  dark purple
+    (0.254, 0.266, 0.530),  # 0.25  blue
+    (0.129, 0.566, 0.551),  # 0.50  teal
+    (0.369, 0.789, 0.383),  # 0.75  green
+    (0.993, 0.906, 0.144),  # 1.00  yellow
+]
+
+
 def _t_to_rgb(t):
     """
-    Map t∈[0,1] to RGB via HSV hue sweep (S=1, V=1).
-    t=0 → blue (hue=240°), t=0.5 → green (hue=120°), t=1 → red (hue=0°).
+    Map t∈[0,1] to RGB using the viridis colormap.
+    t=0 → dark purple, t=0.5 → teal, t=1 → yellow.
+    Uses matplotlib if available, otherwise interpolates built-in control points.
     """
-    hue = (1.0 - t) * 240.0   # degrees: 0=red, 120=green, 240=blue
-    h = hue / 60.0
-    i = int(h) % 6
-    f = h - int(h)
-    q = 1.0 - f
-    segments = [
-        (1.0, f,   0.0),  # 0: red→yellow
-        (q,   1.0, 0.0),  # 1: yellow→green
-        (0.0, 1.0, f  ),  # 2: green→cyan
-        (0.0, q,   1.0),  # 3: cyan→blue
-        (f,   0.0, 1.0),  # 4: blue→magenta
-        (1.0, 0.0, q  ),  # 5: magenta→red
-    ]
-    return segments[i]
+    if _viridis_fn is not None:
+        r, g, b, _ = _viridis_fn(float(t))
+        return r, g, b
+    t = max(0.0, min(1.0, t))
+    n = len(_VIRIDIS_STOPS) - 1
+    lo = min(int(t * n), n - 1)
+    f = t * n - lo
+    r0, g0, b0 = _VIRIDIS_STOPS[lo]
+    r1, g1, b1 = _VIRIDIS_STOPS[lo + 1]
+    return r0 + f * (r1 - r0), g0 + f * (g1 - g0), b0 + f * (b1 - b0)
 
 
 def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w):
