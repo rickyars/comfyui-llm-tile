@@ -157,21 +157,29 @@ Applies a single denoise value to every tile. Good starting point; use when the 
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones to hide seams. |
 
-The tile grid anchors at the top-left corner and snaps the last tile in each row/column to the canvas edge, so every tile is full-size and the full canvas is covered.
+The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, small outside strips are left untouched rather than creating partial edge tiles.
 
 ---
 
 ### Adaptive Tiled Image Detailer
 
-Measures how much is happening in each tile before sampling it, then scales the denoise strength accordingly. Tiles with low spatial variance (flat skies, dark backgrounds, plain walls) get low denoise and are left largely untouched. Tiles with high spatial variance (faces, fur, fabric folds, strong contrast edges) get high denoise and are refined more aggressively.
+Measures each tile before sampling it, then scales the denoise strength accordingly. The current scoring method is `otsu_threshold`: the node builds a global Otsu threshold over latent intensity, treats pixels above that threshold as the bright class, and scores each tile by how much bright-class coverage it contains.
 
-Outputs two things: the refined latent, and a denoise map — a heatmap image showing which tiles got which denoise value using the viridis colormap (dark purple = frozen, teal = mid, yellow = fully refined).
+Outputs three things: the refined latent, a denoise map, and an Otsu map. The denoise map is a tile heatmap using the viridis colormap (dark purple = low denoise, teal = mid, yellow = high denoise). The Otsu map is a black/white debug image where white means latent intensity was above the Otsu threshold.
 
 #### How it works
 
-**Pass 1** measures the latent-space variance of each tile before any sampling. Variance is computed over the spatial dimensions and averaged across channels. A flat gradient scores near zero; a face with strong chiaroscuro scores high.
+**Pass 1** computes the centered whole-tile grid once. The same tile coordinates are used for scoring, the denoise heatmap, and sampling.
 
-All tile variances are normalized to [0, 1] within the image (flattest tile = 0, most complex tile = 1), then mapped through the `curve` exponent, then scaled to [denoise\_min, denoise\_max].
+For `otsu_threshold`, the node averages latent channels into a single intensity map, normalizes it to [0, 1], computes a global Otsu threshold, and creates a bright-class mask:
+
+```
+bright = intensity > otsu_threshold
+```
+
+Each tile's raw score is the fraction of that tile covered by the bright class. A tile with no bright-class pixels scores 0.0; a tile that is half bright-class scores 0.5; a fully bright-class tile scores 1.0.
+
+Tile scores are then normalized to [0, 1] within the image (lowest-scoring tile = 0, highest-scoring tile = 1), mapped through the `curve` exponent, and scaled to [denoise_min, denoise_max].
 
 **Pass 2** runs the standard sampling loop with each tile's computed denoise value.
 
@@ -179,34 +187,37 @@ All tile variances are normalized to [0, 1] within the image (flattest tile = 0,
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `denoise_min` | 0.05 | Denoise applied to the flattest tile. Near zero freezes it. |
-| `denoise_max` | 0.35 | Denoise applied to the most complex tile. |
+| `scoring_method` | `otsu_threshold` | How tile scores are computed. Currently only Otsu bright-class coverage is available. |
+| `denoise_min` | 0.05 | Denoise applied to the lowest-scoring tile. Near zero freezes it. |
+| `denoise_max` | 0.35 | Denoise applied to the highest-scoring tile. |
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels |
 
 #### How `curve` works
 
-After normalizing variance to [0, 1], the node raises it to the power of `curve` before mapping to the denoise range:
+After normalizing tile scores to [0, 1], the node raises the normalized value to the power of `curve` before mapping to the denoise range:
 
 ```
 t_curved = t ^ curve
-denoise  = denoise_min + t_curved × (denoise_max − denoise_min)
+denoise  = denoise_min + t_curved * (denoise_max - denoise_min)
 ```
 
-`t ^ curve` is still 0 at the flat end and 1 at the complex end — the endpoints are fixed. What changes is the shape of the distribution in between.
+`t ^ curve` is still 0 at the low end and 1 at the high end. The endpoints are fixed; what changes is the shape of the distribution in between.
 
-**`curve = 1.0` (linear):** denoise scales evenly with variance. A tile at 50% variance gets 50% of the way between denoise\_min and denoise\_max.
+**`curve = 1.0` (linear):** denoise scales evenly with the normalized tile score. A tile at 50% gets 50% of the way between denoise_min and denoise_max.
 
-**`curve > 1.0` (e.g. 1.5, 2.0):** most tiles are pushed toward denoise\_min. Only the highest-variance tiles approach denoise\_max. Start here for the pseudo-mosaic effect — backgrounds and walls freeze, faces and edges pop. `1.5` is a reasonable default; `2.5+` is aggressive.
+**`curve > 1.0` (e.g. 1.5, 2.0):** mid and low scores are pushed toward denoise_min. Only the highest-scoring tiles approach denoise_max.
 
-**`curve < 1.0` (e.g. 0.5):** most tiles are pushed toward denoise\_max. More of the image gets significant refinement. Useful when you want broad sharpening with only slight restraint on the very flattest areas.
+**`curve < 1.0` (e.g. 0.5):** mid scores are boosted toward denoise_max. More of the image gets significant refinement while the lowest-scoring tiles remain near denoise_min.
 
 Think of `curve` as a contrast control for the denoise distribution, not a global strength control. `denoise_min` and `denoise_max` set the floor and ceiling; `curve` sets how quickly the population of tiles rises from the floor.
 
+The current `curve` is a gamma curve, not an S-curve. It preserves fixed endpoints: normalized score 0 always maps to `denoise_min`, and normalized score 1 always maps to `denoise_max`. Use `curve < 1.0` if you want most non-purple tiles to receive higher denoise. A future S-curve or threshold/knee control would be better for "purple gets almost nothing, everything else gets a lot."
+
 #### Edge cases
 
-If all tiles have identical variance (uniform image, or single-tile canvas), every tile gets `denoise_max`.
+If all tiles have identical scores and the score is near zero, every tile gets `denoise_min`. If all tiles have the same non-zero score, every tile gets `denoise_max`.
 
 ---
 

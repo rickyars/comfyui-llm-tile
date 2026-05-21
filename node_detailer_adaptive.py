@@ -37,6 +37,77 @@ def _tile_complexity(canvas, tile_coords):
     return result
 
 
+def _otsu_threshold(values, bins=256):
+    """
+    Return an Otsu threshold for a 1D tensor normalized to [0, 1].
+    """
+    values = values.flatten().float().clamp(0.0, 1.0)
+    if values.numel() == 0:
+        return 0.0
+
+    hist = torch.histc(values, bins=bins, min=0.0, max=1.0)
+    total = hist.sum()
+    if total <= 0:
+        return 0.0
+
+    centers = torch.linspace(0.0, 1.0, bins, device=hist.device)
+    weight_bg = torch.cumsum(hist, dim=0)
+    weight_fg = total - weight_bg
+    sum_bg = torch.cumsum(hist * centers, dim=0)
+    sum_total = sum_bg[-1]
+
+    valid = (weight_bg > 0) & (weight_fg > 0)
+    variance = torch.zeros_like(hist)
+    mean_bg = sum_bg[valid] / weight_bg[valid]
+    mean_fg = (sum_total - sum_bg[valid]) / weight_fg[valid]
+    variance[valid] = weight_bg[valid] * weight_fg[valid] * (mean_bg - mean_fg) ** 2
+
+    return centers[int(torch.argmax(variance).item())].item()
+
+
+def _tile_otsu_scores(canvas, tile_coords):
+    """
+    Score tiles by coverage of the bright class from a global Otsu split.
+
+    This is a no-mask subject/background proxy. It builds a latent intensity map,
+    thresholds it globally with Otsu, and returns bright-class coverage per tile.
+    """
+    intensity = canvas.mean(dim=1, keepdim=True)
+    v_min = intensity.min()
+    v_max = intensity.max()
+    if (v_max - v_min).abs().item() <= _QUIET_SCORE_EPSILON:
+        return [0.0 for _ in tile_coords]
+
+    intensity = (intensity - v_min) / (v_max - v_min)
+    threshold = _otsu_threshold(intensity)
+
+    foreground = intensity > threshold
+
+    result = []
+    for (y1, x1, y2, x2) in tile_coords:
+        result.append(foreground[:, :, y1:y2, x1:x2].float().mean().item())
+    return result
+
+
+def _build_otsu_map(canvas):
+    """
+    Build a pixel-space IMAGE preview of the global Otsu bright-class mask.
+    """
+    _, _, H, W = canvas.shape
+    intensity = canvas.mean(dim=1, keepdim=True)
+    v_min = intensity.min()
+    v_max = intensity.max()
+    if (v_max - v_min).abs().item() <= _QUIET_SCORE_EPSILON:
+        mask = torch.zeros_like(intensity)
+    else:
+        intensity = (intensity - v_min) / (v_max - v_min)
+        threshold = _otsu_threshold(intensity)
+        mask = (intensity > threshold).float()
+
+    img = mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
+    return img.repeat_interleave(8, dim=1).repeat_interleave(8, dim=2)
+
+
 def _scores_to_denoise(scores, curve, denoise_min, denoise_max):
     """
     scores: list of float complexity values (one per tile)
@@ -149,6 +220,7 @@ class LLMAdaptiveTileDetailer:
                 "cfg": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "step": 0.1}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "scoring_method": (["otsu_threshold"], {"default": "otsu_threshold"}),
                 "denoise_min": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "denoise_max": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "curve": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 5.0, "step": 0.1}),
@@ -157,14 +229,14 @@ class LLMAdaptiveTileDetailer:
             }
         }
 
-    RETURN_TYPES = ("LATENT", "IMAGE")
-    RETURN_NAMES = ("refined_latent", "denoise_map")
+    RETURN_TYPES = ("LATENT", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("refined_latent", "denoise_map", "otsu_map")
     FUNCTION = "detail"
     CATEGORY = "image/generation"
 
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler,
-               denoise_min, denoise_max, curve, tile_size, overlap):
+               scoring_method, denoise_min, denoise_max, curve, tile_size, overlap):
 
         canvas = upscaled_latent["samples"].clone()
         _, _, H, W = canvas.shape
@@ -190,7 +262,12 @@ class LLMAdaptiveTileDetailer:
         print(f"[LLMAdaptiveTileDetailer] grid starts px "
               f"x={[x * 8 for x in x_starts]} y={[y * 8 for y in y_starts]}")
 
-        scores = _tile_complexity(canvas, tile_coords)
+        if scoring_method == "otsu_threshold":
+            scores = _tile_otsu_scores(canvas, tile_coords)
+            otsu_map_img = _build_otsu_map(canvas)
+        else:
+            raise ValueError(f"Unknown scoring_method: {scoring_method}")
+
         td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
         denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows)
 
@@ -204,7 +281,7 @@ class LLMAdaptiveTileDetailer:
             score = scores[tile_idx]
 
             print(f"[LLMAdaptiveTileDetailer] tile ({r},{c}) "
-                  f"grad={score:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
+                  f"{scoring_method}={score:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
 
             tile_seed = seed + tile_idx
             tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
@@ -225,7 +302,7 @@ class LLMAdaptiveTileDetailer:
             comfy.model_management.soft_empty_cache()
             pbar.update(1)
 
-        return ({"samples": canvas}, denoise_map_img)
+        return ({"samples": canvas}, denoise_map_img, otsu_map_img)
 
 
 NODE_CLASS_MAPPINGS = {
