@@ -84,25 +84,31 @@ def _t_to_rgb(t):
 
 def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
     """
-    tile_coords: list of (y1, x1, y2, x2) — used only to determine tile count
+    tile_coords: list of (y1, x1, y2, x2) in latent space — exact sampler positions.
     t_values:    list of pre-curve normalized score [0,1], one per tile
-    canvas_h, canvas_w: latent-space dimensions (pixel dims = these × 8)
-    cols, rows: strides in each axis; grid is (cols+1) × (rows+1) tiles
+    canvas_h, canvas_w: latent-space dimensions (pixel dims = these x 8)
+    cols, rows: strides in each axis; grid is (cols+1) x (rows+1) tiles
     Returns: IMAGE tensor [1, canvas_h*8, canvas_w*8, 3]
 
-    Draws equal-size display cells (one per tile) rather than actual tile
-    footprints, so the last column/row never appears wider than the others.
+    Paints each tile from its x1/y1 to the next tile's x1/y1 (or canvas edge
+    for the last column/row). The heatmap maps exactly to the sampler grid.
     """
     H_px, W_px = canvas_h * 8, canvas_w * 8
     img = torch.zeros(1, H_px, W_px, 3)
-    n_cols, n_rows = cols + 1, rows + 1
+    n_cols = cols + 1
+
+    # Pull the x start of each column and y start of each row directly from
+    # tile_coords (row-major order: index = r * n_cols + c).
+    x_starts = [tile_coords[c][1] for c in range(n_cols)]
+    y_starts = [tile_coords[r * n_cols][0] for r in range(rows + 1)]
+
     for idx, t in enumerate(t_values):
         row = idx // n_cols
         col = idx % n_cols
-        px0 = round(col * W_px / n_cols)
-        px1 = round((col + 1) * W_px / n_cols)
-        py0 = round(row * H_px / n_rows)
-        py1 = round((row + 1) * H_px / n_rows)
+        px0 = x_starts[col] * 8
+        px1 = (x_starts[col + 1] * 8) if col < cols else W_px
+        py0 = y_starts[row] * 8
+        py1 = (y_starts[row + 1] * 8) if row < rows else H_px
         r, g, b = _t_to_rgb(t)
         img[0, py0:py1, px0:px1, 0] = r
         img[0, py0:py1, px0:px1, 1] = g

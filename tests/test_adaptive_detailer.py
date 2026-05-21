@@ -109,15 +109,15 @@ def test_build_denoise_map_bright_for_t_one():
     assert result[0, 0, 0, 1].item() > 0.80  # high G
 
 
-def test_build_denoise_map_equal_cells():
-    # 2-row, 1-column grid: top tile dark (t=0), bottom tile yellow (t=1)
-    coords = [(0, 0, 4, 4), (2, 0, 6, 4)]
+def test_build_denoise_map_matches_sampler_grid():
+    # 2-row, 1-column grid (cols=0, rows=1).
+    # Tile positions: r=0 at y1=0, r=1 at y1=2 (both latent).
+    # Heatmap should paint: top tile from y=0 to y=2*8=16px, bottom from 16 to 32px.
+    coords = [(0, 0, 4, 4), (2, 0, 6, 4)]  # (y1, x1, y2, x2) in latent
     t_values = [0.0, 1.0]
     result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=1)
-    H_px = 32
-    # Top cell covers rows 0..H_px/2; bottom cell covers H_px/2..H_px
-    # Equal-size cells — both halves should be exactly H_px/2 tall
-    top_max = result[0, H_px // 4, 16].max().item()      # mid-point of top cell
-    bottom_r = result[0, 3 * H_px // 4, 16, 0].item()   # mid-point of bottom cell
-    assert top_max < 0.50      # dark purple
-    assert bottom_r > 0.90     # yellow (high red)
+    # y_starts = [0, 2] latent; top cell py0=0, py1=16; bottom py0=16, py1=32
+    top_max = result[0, 8, 16].max().item()    # inside top cell (y=8 < 16)
+    bottom_r = result[0, 24, 16, 0].item()    # inside bottom cell (y=24 >= 16)
+    assert top_max < 0.50    # dark purple
+    assert bottom_r > 0.90   # yellow (high red)
