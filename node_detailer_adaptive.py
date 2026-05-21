@@ -113,6 +113,16 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
         img[0, py0:py1, px0:px1, 0] = r
         img[0, py0:py1, px0:px1, 1] = g
         img[0, py0:py1, px0:px1, 2] = b
+
+    # White grid lines at every tile boundary so dividers are visible
+    # even when adjacent tiles share similar viridis colors.
+    for x_lat in x_starts[1:]:
+        px = x_lat * 8
+        img[0, :, max(0, px - 1):min(W_px, px + 1), :] = 1.0
+    for y_lat in y_starts[1:]:
+        py = y_lat * 8
+        img[0, max(0, py - 1):min(H_px, py + 1), :, :] = 1.0
+
     return img
 
 
