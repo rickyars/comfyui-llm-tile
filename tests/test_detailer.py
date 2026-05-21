@@ -58,12 +58,11 @@ def test_full_coverage_grid():
     # 1000x2048 portrait: latent W=125, H=256
     # tile_size=1024 → tile_l=128; overlap=64 → overlap_l=8
     cols, rows = _compute_center_grid(W=125, H=256, tile_l=128, overlap_l=8)
-    stride = 128 - 8  # 120
 
     # W=125 <= tile_l=128 → single column (cols=0)
     assert cols == 0
-    # ceil((256-128)/120) = ceil(1.07) = 2
-    assert rows == 2
+    # ceil(256/128) - 1 = 2 - 1 = 1 → 2 tiles cover H exactly
+    assert rows == 1
 
     # Collect all tile coordinates using even-distribution formula
     all_x, all_y = set(), set()

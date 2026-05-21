@@ -217,16 +217,16 @@ def _compute_center_grid(W, H, tile_l, overlap_l):
     Returns (cols, rows) — number of strides in each axis.
     Iterate c in range(cols+1), r in range(rows+1) for all tiles.
 
-    Tile positions (caller computes):
-        x1 = min(c * stride, max(0, W - tile_l))
-        y1 = min(r * stride, max(0, H - tile_l))
+    Tile positions (caller computes via even distribution):
+        x1 = round(c * (W - tile_l) / cols)  if cols > 0 else 0
+        y1 = round(r * (H - tile_l) / rows)  if rows > 0 else 0
         x2 = min(W, x1 + tile_l)
         y2 = min(H, y1 + tile_l)
 
-    The last tile in each axis snaps to the canvas edge so coverage is
-    always 0→W and 0→H with no uncovered margins.
+    Grid density is determined by tile size only: ceil(W / tile_l) tiles in x,
+    ceil(H / tile_l) tiles in y. overlap_l is retained for API compatibility
+    but does not affect grid count — it is used only for feather blending.
     """
-    stride = tile_l - overlap_l
-    cols = 0 if W <= tile_l else math.ceil((W - tile_l) / stride)
-    rows = 0 if H <= tile_l else math.ceil((H - tile_l) / stride)
+    cols = 0 if W <= tile_l else math.ceil(W / tile_l) - 1
+    rows = 0 if H <= tile_l else math.ceil(H / tile_l) - 1
     return cols, rows
