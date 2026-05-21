@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -227,6 +225,30 @@ def _compute_center_grid(W, H, tile_l, overlap_l):
     ceil(H / tile_l) tiles in y. overlap_l is retained for API compatibility
     but does not affect grid count — it is used only for feather blending.
     """
-    cols = 0 if W <= tile_l else math.ceil(W / tile_l) - 1
-    rows = 0 if H <= tile_l else math.ceil(H / tile_l) - 1
+    tile_count_x = max(1, W // tile_l)
+    tile_count_y = max(1, H // tile_l)
+    cols = tile_count_x - 1
+    rows = tile_count_y - 1
     return cols, rows
+
+
+def _compute_tile_coords(W, H, tile_l, cols, rows):
+    """
+    Return row-major full-coverage tile coordinates in latent space.
+
+    The first tile starts at the left/top edge and the last tile ends at the
+    right/bottom edge. Any leftover pixels are absorbed by distributing extra
+    overlap across the grid, so there are no skipped edge slivers.
+    """
+    coords = []
+    start_x = max(0, round((W - (cols + 1) * tile_l) / 2))
+    start_y = max(0, round((H - (rows + 1) * tile_l) / 2))
+    for r in range(rows + 1):
+        for c in range(cols + 1):
+            x1 = start_x + c * tile_l
+            y1 = start_y + r * tile_l
+            y2 = y1 + tile_l
+            x2 = x1 + tile_l
+            if y2 > y1 and x2 > x1:
+                coords.append((y1, x1, y2, x2))
+    return coords

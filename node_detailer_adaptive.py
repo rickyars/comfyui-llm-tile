@@ -6,9 +6,9 @@ from comfy.utils import ProgressBar
 
 # Support both relative imports (in package) and direct imports (in tests)
 if __package__:
-    from .utils import feather_blend_latent, _compute_center_grid
+    from .utils import feather_blend_latent, _compute_center_grid, _compute_tile_coords
 else:
-    from utils import feather_blend_latent, _compute_center_grid
+    from utils import feather_blend_latent, _compute_center_grid, _compute_tile_coords
 
 
 def _tile_complexity(canvas, tile_coords):
@@ -24,9 +24,16 @@ def _tile_complexity(canvas, tile_coords):
     result = []
     for (y1, x1, y2, x2) in tile_coords:
         tile = canvas[:, :, y1:y2, x1:x2]
-        dx = (tile[:, :, :, 1:] - tile[:, :, :, :-1]).abs().mean()
-        dy = (tile[:, :, 1:, :] - tile[:, :, :-1, :]).abs().mean()
-        result.append(((dx + dy) / 2).item())
+        if tile.shape[2] <= 1 or tile.shape[3] <= 1:
+            result.append(0.0)
+            continue
+
+        dx = (tile[:, :, :-1, 1:] - tile[:, :, :-1, :-1]).abs()
+        dy = (tile[:, :, 1:, :-1] - tile[:, :, :-1, :-1]).abs()
+        grad = (dx + dy).mean(dim=1).flatten()
+
+        k = max(1, int(grad.numel() * 0.10))
+        result.append(grad.topk(k).values.mean().item())
     return result
 
 
@@ -38,11 +45,19 @@ def _scores_to_denoise(scores, curve, denoise_min, denoise_max):
       t      — pre-curve normalized score in [0,1] (used for heatmap)
       denoise — final per-tile denoise value
     """
+    if not scores:
+        return []
+
     v_min = min(scores)
     v_max = max(scores)
     result = []
     for v in scores:
-        t = 1.0 if v_max == v_min else (v - v_min) / (v_max - v_min)
+        if v_max == v_min:
+            # Equal and flat means there is no evidence that any region deserves
+            # the high-denoise path. Equal but non-flat still benefits from it.
+            t = 0.0 if v_max <= _QUIET_SCORE_EPSILON else 1.0
+        else:
+            t = (v - v_min) / (v_max - v_min)
         t_curved = t ** curve
         denoise = denoise_min + t_curved * (denoise_max - denoise_min)
         result.append((t, denoise))
@@ -62,6 +77,8 @@ _VIRIDIS_STOPS = [
     (0.369, 0.789, 0.383),  # 0.75  green
     (0.993, 0.906, 0.144),  # 1.00  yellow
 ]
+
+_QUIET_SCORE_EPSILON = 1e-8
 
 
 def _t_to_rgb(t):
@@ -95,33 +112,21 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
     """
     H_px, W_px = canvas_h * 8, canvas_w * 8
     img = torch.zeros(1, H_px, W_px, 3)
-    n_cols = cols + 1
 
-    # Pull the x start of each column and y start of each row directly from
-    # tile_coords (row-major order: index = r * n_cols + c).
-    x_starts = [tile_coords[c][1] for c in range(n_cols)]
-    y_starts = [tile_coords[r * n_cols][0] for r in range(rows + 1)]
-
-    for idx, t in enumerate(t_values):
-        row = idx // n_cols
-        col = idx % n_cols
-        px0 = x_starts[col] * 8
-        px1 = (x_starts[col + 1] * 8) if col < cols else W_px
-        py0 = y_starts[row] * 8
-        py1 = (y_starts[row + 1] * 8) if row < rows else H_px
+    for (y1, x1, y2, x2), t in zip(tile_coords, t_values):
+        px0 = x1 * 8
+        px1 = x2 * 8
+        py0 = y1 * 8
+        py1 = y2 * 8
         r, g, b = _t_to_rgb(t)
         img[0, py0:py1, px0:px1, 0] = r
         img[0, py0:py1, px0:px1, 1] = g
         img[0, py0:py1, px0:px1, 2] = b
 
-    # White grid lines at every tile boundary so dividers are visible
-    # even when adjacent tiles share similar viridis colors.
-    for x_lat in x_starts[1:]:
-        px = x_lat * 8
-        img[0, :, max(0, px - 1):min(W_px, px + 1), :] = 1.0
-    for y_lat in y_starts[1:]:
-        py = y_lat * 8
-        img[0, max(0, py - 1):min(H_px, py + 1), :, :] = 1.0
+        img[0, py0:min(py0 + 2, py1), px0:px1, :] = 1.0
+        img[0, max(py1 - 2, py0):py1, px0:px1, :] = 1.0
+        img[0, py0:py1, px0:min(px0 + 2, px1), :] = 1.0
+        img[0, py0:py1, max(px1 - 2, px0):px1, :] = 1.0
 
     return img
 
@@ -178,16 +183,12 @@ class LLMAdaptiveTileDetailer:
               f"tile_l={tile_l} overlap_l={overlap_l} stride={stride} | "
               f"grid cols={cols} rows={rows} ({(rows+1)*(cols+1)} tiles)")
 
-        # --- Pass 1: collect valid tile coords and measure variance ---
-        tile_coords = []
-        for r in range(rows + 1):
-            for c in range(cols + 1):
-                x1 = round(c * (W - tile_l) / cols) if cols > 0 else 0
-                y1 = round(r * (H - tile_l) / rows) if rows > 0 else 0
-                y2 = min(H, y1 + tile_l)
-                x2 = min(W, x1 + tile_l)
-                if y2 > y1 and x2 > x1:
-                    tile_coords.append((y1, x1, y2, x2))
+        # --- Pass 1: collect valid tile coords and measure complexity ---
+        tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows)
+        x_starts = sorted({x1 for _, x1, _, _ in tile_coords})
+        y_starts = sorted({y1 for y1, _, _, _ in tile_coords})
+        print(f"[LLMAdaptiveTileDetailer] grid starts px "
+              f"x={[x * 8 for x in x_starts]} y={[y * 8 for y in y_starts]}")
 
         scores = _tile_complexity(canvas, tile_coords)
         td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
@@ -195,41 +196,34 @@ class LLMAdaptiveTileDetailer:
 
         # --- Pass 2: sample each tile with its computed denoise ---
         pbar = ProgressBar(len(tile_coords))
-        tile_idx = 0
-        for r in range(rows + 1):
-            for c in range(cols + 1):
-                x1 = round(c * (W - tile_l) / cols) if cols > 0 else 0
-                y1 = round(r * (H - tile_l) / rows) if rows > 0 else 0
-                y2 = min(H, y1 + tile_l)
-                x2 = min(W, x1 + tile_l)
-                if y2 <= y1 or x2 <= x1:
-                    continue
+        n_cols = cols + 1
+        for tile_idx, (y1, x1, y2, x2) in enumerate(tile_coords):
+            r = tile_idx // n_cols
+            c = tile_idx % n_cols
+            t_val, tile_denoise = td_pairs[tile_idx]
+            score = scores[tile_idx]
 
-                t_val, tile_denoise = td_pairs[tile_idx]
-                score = scores[tile_idx]
-                tile_idx += 1
+            print(f"[LLMAdaptiveTileDetailer] tile ({r},{c}) "
+                  f"grad={score:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
 
-                print(f"[LLMAdaptiveTileDetailer] tile ({r},{c}) "
-                      f"grad={score:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
+            tile_seed = seed + tile_idx
+            tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
 
-                tile_seed = seed + r * (cols + 1) + c
-                tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
+            noise = comfy.sample.prepare_noise(tile_latent, tile_seed, None)
+            refined = comfy.sample.sample(
+                model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, tile_latent,
+                denoise=tile_denoise,
+            )
 
-                noise = comfy.sample.prepare_noise(tile_latent, tile_seed, None)
-                refined = comfy.sample.sample(
-                    model, noise, steps, cfg, sampler_name, scheduler,
-                    positive, negative, tile_latent,
-                    denoise=tile_denoise,
-                )
+            feather_blend_latent(
+                canvas, refined, y1, x1, overlap_l,
+                has_left=(c > 0 and x1 < tile_coords[tile_idx - 1][3]),
+                has_top=(r > 0 and y1 < tile_coords[tile_idx - n_cols][2]),
+            )
 
-                feather_blend_latent(
-                    canvas, refined, y1, x1, overlap_l,
-                    has_left=(x1 > 0),
-                    has_top=(y1 > 0),
-                )
-
-                comfy.model_management.soft_empty_cache()
-                pbar.update(1)
+            comfy.model_management.soft_empty_cache()
+            pbar.update(1)
 
         return ({"samples": canvas}, denoise_map_img)
 

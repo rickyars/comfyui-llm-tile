@@ -4,7 +4,7 @@ import comfy.model_management
 import comfy.samplers
 from comfy.utils import ProgressBar
 
-from .utils import feather_blend_latent, _compute_center_grid
+from .utils import feather_blend_latent, _compute_center_grid, _compute_tile_coords
 
 
 class LLMTileSequentialDetailer:
@@ -58,36 +58,30 @@ class LLMTileSequentialDetailer:
               f"grid cols={cols} rows={rows} ({total_tiles} tiles)")
 
         pbar = ProgressBar(total_tiles)
+        tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows)
+        n_cols = cols + 1
 
-        for r in range(rows + 1):
-            for c in range(cols + 1):
-                x1 = round(c * (W - tile_l) / cols) if cols > 0 else 0
-                y1 = round(r * (H - tile_l) / rows) if rows > 0 else 0
-                y2 = min(H, y1 + tile_l)
-                x2 = min(W, x1 + tile_l)
+        for tile_idx, (y1, x1, y2, x2) in enumerate(tile_coords):
+            r = tile_idx // n_cols
+            c = tile_idx % n_cols
+            tile_seed = seed + tile_idx
+            tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
 
-                if y2 <= y1 or x2 <= x1:
-                    pbar.update(1)
-                    continue
+            noise = comfy.sample.prepare_noise(tile_latent, tile_seed, None)
+            refined = comfy.sample.sample(
+                model, noise, steps, cfg, sampler_name, scheduler,
+                positive, negative, tile_latent,
+                denoise=denoise,
+            )
 
-                tile_seed = seed + r * (cols + 1) + c
-                tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
+            feather_blend_latent(
+                canvas, refined, y1, x1, overlap_l,
+                has_left=(c > 0 and x1 < tile_coords[tile_idx - 1][3]),
+                has_top=(r > 0 and y1 < tile_coords[tile_idx - n_cols][2]),
+            )
 
-                noise = comfy.sample.prepare_noise(tile_latent, tile_seed, None)
-                refined = comfy.sample.sample(
-                    model, noise, steps, cfg, sampler_name, scheduler,
-                    positive, negative, tile_latent,
-                    denoise=denoise,
-                )
-
-                feather_blend_latent(
-                    canvas, refined, y1, x1, overlap_l,
-                    has_left=(x1 > 0),
-                    has_top=(y1 > 0),
-                )
-
-                comfy.model_management.soft_empty_cache()
-                pbar.update(1)
+            comfy.model_management.soft_empty_cache()
+            pbar.update(1)
 
         return ({"samples": canvas},)
 
