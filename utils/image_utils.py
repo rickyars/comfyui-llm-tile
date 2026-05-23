@@ -181,24 +181,27 @@ def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
     # Hard-write the full refined tile
     canvas[:, :, y1:y1 + tile_h, x1:x1 + tile_w] = refined_cpu
 
+    def _smoothstep(t):
+        return t * t * (3.0 - 2.0 * t)
+
     # Left overlap: ramp alpha 0→1 across overlap columns (old canvas → refined)
     if left_zone is not None and tile_w > overlap_l:
-        alpha = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, 1, overlap_l)
+        alpha = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, 1, overlap_l)
         canvas[:, :, y1:y1 + tile_h, x1:x1 + overlap_l] = (
             (1.0 - alpha) * left_zone + alpha * refined_cpu[:, :, :, :overlap_l]
         )
 
     # Top overlap: ramp alpha 0→1 across overlap rows (old canvas → refined)
     if top_zone is not None and tile_h > overlap_l:
-        alpha = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, overlap_l, 1)
+        alpha = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, overlap_l, 1)
         canvas[:, :, y1:y1 + overlap_l, x1:x1 + tile_w] = (
             (1.0 - alpha) * top_zone + alpha * refined_cpu[:, :, :overlap_l, :]
         )
 
     # Corner: min(alpha_x, alpha_y) for smooth 2D diagonal blend
     if corner_zone is not None and tile_w > overlap_l and tile_h > overlap_l:
-        alpha_x = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, 1, overlap_l)
-        alpha_y = torch.linspace(0.0, 1.0, overlap_l, device=canvas.device).view(1, 1, overlap_l, 1)
+        alpha_x = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, 1, overlap_l)
+        alpha_y = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, overlap_l, 1)
         alpha = torch.min(
             alpha_x.expand(1, 1, overlap_l, overlap_l),
             alpha_y.expand(1, 1, overlap_l, overlap_l),
@@ -210,45 +213,40 @@ def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
 
 def _compute_center_grid(W, H, tile_l, overlap_l):
     """
-    Compute a full-coverage tile grid anchored at (0, 0).
+    Compute a full-coverage tile grid. Grid count is determined by tile_l only.
 
     Returns (cols, rows) — number of strides in each axis.
-    Iterate c in range(cols+1), r in range(rows+1) for all tiles.
+    Tile count in each axis is cols+1 / rows+1.
 
-    Tile positions (caller computes via even distribution):
-        x1 = round(c * (W - tile_l) / cols)  if cols > 0 else 0
-        y1 = round(r * (H - tile_l) / rows)  if rows > 0 else 0
-        x2 = min(W, x1 + tile_l)
-        y2 = min(H, y1 + tile_l)
-
-    Grid density is determined by tile size only: ceil(W / tile_l) tiles in x,
-    ceil(H / tile_l) tiles in y. overlap_l is retained for API compatibility
-    but does not affect grid count — it is used only for feather blending.
+    Tile positions are anchored at multiples of tile_l. When overlap_l > 0,
+    each non-edge tile extends into its neighbor's territory by overlap_l pixels
+    (see _compute_tile_coords), so the grid count stays the same but tiles overlap.
     """
-    tile_count_x = max(1, W // tile_l)
-    tile_count_y = max(1, H // tile_l)
-    cols = tile_count_x - 1
-    rows = tile_count_y - 1
+    cols = max(0, W // tile_l - 1)
+    rows = max(0, H // tile_l - 1)
     return cols, rows
 
 
-def _compute_tile_coords(W, H, tile_l, cols, rows):
+def _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l=0):
     """
-    Return row-major full-coverage tile coordinates in latent space.
+    Return row-major tile coordinates in latent space.
 
-    The first tile starts at the left/top edge and the last tile ends at the
-    right/bottom edge. Any leftover pixels are absorbed by distributing extra
-    overlap across the grid, so there are no skipped edge slivers.
+    The core grid is centered: start_x = round((W - (cols+1)*tile_l) / 2).
+    Each tile anchor is at (start_x + c*tile_l, start_y + r*tile_l). When
+    overlap_l > 0, non-edge tiles are grown into their left/top neighbor's
+    territory by overlap_l pixels, creating positional overlap without
+    adding extra tiles to the grid.
     """
-    coords = []
     start_x = max(0, round((W - (cols + 1) * tile_l) / 2))
     start_y = max(0, round((H - (rows + 1) * tile_l) / 2))
+    coords = []
     for r in range(rows + 1):
         for c in range(cols + 1):
-            x1 = start_x + c * tile_l
-            y1 = start_y + r * tile_l
-            y2 = y1 + tile_l
-            x2 = x1 + tile_l
-            if y2 > y1 and x2 > x1:
-                coords.append((y1, x1, y2, x2))
+            x_anchor = start_x + c * tile_l
+            y_anchor = start_y + r * tile_l
+            x1 = (x_anchor - overlap_l) if c > 0 else x_anchor
+            y1 = (y_anchor - overlap_l) if r > 0 else y_anchor
+            x2 = x_anchor + tile_l
+            y2 = y_anchor + tile_l
+            coords.append((y1, x1, y2, x2))
     return coords

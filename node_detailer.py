@@ -28,6 +28,7 @@ class LLMTileSequentialDetailer:
                 "denoise": ("FLOAT", {"default": 0.25, "min": 0.05, "max": 1.0, "step": 0.01}),
                 "tile_size": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 8}),
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
+                "crop_to_tiles": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -37,7 +38,7 @@ class LLMTileSequentialDetailer:
     CATEGORY = "image/generation"
 
     def detail(self, model, upscaled_latent, positive, negative,
-               seed, steps, cfg, sampler_name, scheduler, denoise, tile_size, overlap):
+               seed, steps, cfg, sampler_name, scheduler, denoise, tile_size, overlap, crop_to_tiles):
 
         canvas = upscaled_latent["samples"].clone()
         _, _, H, W = canvas.shape
@@ -58,7 +59,7 @@ class LLMTileSequentialDetailer:
               f"grid cols={cols} rows={rows} ({total_tiles} tiles)")
 
         pbar = ProgressBar(total_tiles)
-        tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows)
+        tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l)
         n_cols = cols + 1
 
         for tile_idx, (y1, x1, y2, x2) in enumerate(tile_coords):
@@ -82,6 +83,11 @@ class LLMTileSequentialDetailer:
 
             comfy.model_management.soft_empty_cache()
             pbar.update(1)
+
+        if crop_to_tiles:
+            y1_c, x1_c = tile_coords[0][0], tile_coords[0][1]
+            y2_c, x2_c = tile_coords[-1][2], tile_coords[cols][3]
+            canvas = canvas[:, :, y1_c:y2_c, x1_c:x2_c]
 
         return ({"samples": canvas},)
 

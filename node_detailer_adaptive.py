@@ -135,6 +135,29 @@ def _scores_to_denoise(scores, curve, denoise_min, denoise_max):
     return result
 
 
+def _smooth_scores(scores, n_rows, n_cols, own_weight=0.7):
+    """
+    Blend each tile's score with the average of its 4-connected neighbors.
+    own_weight: fraction of the tile's own score to retain (rest comes from neighbors).
+    """
+    neighbor_weight = 1.0 - own_weight
+    smoothed = []
+    for idx, score in enumerate(scores):
+        r, c = divmod(idx, n_cols)
+        neighbors = []
+        if r > 0:
+            neighbors.append(scores[(r - 1) * n_cols + c])
+        if r < n_rows - 1:
+            neighbors.append(scores[(r + 1) * n_cols + c])
+        if c > 0:
+            neighbors.append(scores[r * n_cols + (c - 1)])
+        if c < n_cols - 1:
+            neighbors.append(scores[r * n_cols + (c + 1)])
+        neighbor_avg = sum(neighbors) / len(neighbors) if neighbors else score
+        smoothed.append(own_weight * score + neighbor_weight * neighbor_avg)
+    return smoothed
+
+
 try:
     from matplotlib import cm as _mpl_cm
     _viridis_fn = _mpl_cm.viridis
@@ -223,9 +246,10 @@ class LLMAdaptiveTileDetailer:
                 "scoring_method": (["otsu_threshold"], {"default": "otsu_threshold"}),
                 "denoise_min": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "denoise_max": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "curve": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 5.0, "step": 0.1}),
+                "curve": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 5.0, "step": 0.01}),
                 "tile_size": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 8}),
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
+                "crop_to_tiles": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -236,7 +260,7 @@ class LLMAdaptiveTileDetailer:
 
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler,
-               scoring_method, denoise_min, denoise_max, curve, tile_size, overlap):
+               scoring_method, denoise_min, denoise_max, curve, tile_size, overlap, crop_to_tiles):
 
         canvas = upscaled_latent["samples"].clone()
         _, _, H, W = canvas.shape
@@ -256,7 +280,7 @@ class LLMAdaptiveTileDetailer:
               f"grid cols={cols} rows={rows} ({(rows+1)*(cols+1)} tiles)")
 
         # --- Pass 1: collect valid tile coords and measure complexity ---
-        tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows)
+        tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l)
         x_starts = sorted({x1 for _, x1, _, _ in tile_coords})
         y_starts = sorted({y1 for y1, _, _, _ in tile_coords})
         print(f"[LLMAdaptiveTileDetailer] grid starts px "
@@ -268,6 +292,7 @@ class LLMAdaptiveTileDetailer:
         else:
             raise ValueError(f"Unknown scoring_method: {scoring_method}")
 
+        scores = _smooth_scores(scores, rows + 1, cols + 1)
         td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
         denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows)
 
@@ -301,6 +326,13 @@ class LLMAdaptiveTileDetailer:
 
             comfy.model_management.soft_empty_cache()
             pbar.update(1)
+
+        if crop_to_tiles:
+            y1_c, x1_c = tile_coords[0][0], tile_coords[0][1]
+            y2_c, x2_c = tile_coords[-1][2], tile_coords[cols][3]
+            canvas = canvas[:, :, y1_c:y2_c, x1_c:x2_c]
+            denoise_map_img = denoise_map_img[:, y1_c * 8:y2_c * 8, x1_c * 8:x2_c * 8, :]
+            otsu_map_img = otsu_map_img[:, y1_c * 8:y2_c * 8, x1_c * 8:x2_c * 8, :]
 
         return ({"samples": canvas}, denoise_map_img, otsu_map_img)
 

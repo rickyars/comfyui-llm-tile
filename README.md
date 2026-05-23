@@ -155,7 +155,8 @@ Applies a single denoise value to every tile. Good starting point; use when the 
 |---|---|---|
 | `denoise` | 0.25 | Applied uniformly to every tile |
 | `tile_size` | 1024 | Tile size in pixels |
-| `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones to hide seams. |
+| `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones using a smoothstep curve to hide seams. |
+| `crop_to_tiles` | false | Crop the output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and the outer strips are left untouched. Enable this to remove those strips from the output. |
 
 The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, small outside strips are left untouched rather than creating partial edge tiles.
 
@@ -181,6 +182,8 @@ Each tile's raw score is the fraction of that tile covered by the bright class. 
 
 Tile scores are then normalized to [0, 1] within the image (lowest-scoring tile = 0, highest-scoring tile = 1), mapped through the `curve` exponent, and scaled to [denoise_min, denoise_max].
 
+After scoring, each tile's raw score is blended with the average of its 4-connected neighbors (70% own, 30% neighbor average). This prevents abrupt denoise jumps between adjacent tiles while preserving the coarse adaptive distribution.
+
 **Pass 2** runs the standard sampling loop with each tile's computed denoise value.
 
 #### Parameters
@@ -192,7 +195,8 @@ Tile scores are then normalized to [0, 1] within the image (lowest-scoring tile 
 | `denoise_max` | 0.35 | Denoise applied to the highest-scoring tile. |
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
 | `tile_size` | 1024 | Tile size in pixels |
-| `overlap` | 64 | Overlap between adjacent tiles in pixels |
+| `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended using a smoothstep curve to hide seams. |
+| `crop_to_tiles` | false | Crop output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and outer strips are left untouched. Enable this to remove those strips from the output latent and debug images. |
 
 #### How `curve` works
 
