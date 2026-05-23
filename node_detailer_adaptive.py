@@ -226,6 +226,12 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
     return img
 
 
+def _region_detail(sample, ry, rx, rh, rw):
+    if rh * rw < 2:
+        return 0.0
+    return sample[:, ry:ry + rh, rx:rx + rw].std(dim=[1, 2]).sum().item()
+
+
 def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
     """
     Score tiles by quadtree leaf density in latent space.
@@ -247,12 +253,6 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1)
     """
     sample = canvas[0]  # [C, H, W] — batch dim is always 1 in tiled workflows
 
-    def _region_detail(ry, rx, rh, rw):
-        if rh * rw < 2:
-            return 0.0
-        region = sample[:, ry:ry + rh, rx:rx + rw]  # [C, rH, rW]
-        return region.std(dim=[1, 2]).sum().item()
-
     result = []
     for (y1, x1, y2, x2) in tile_coords:
         th = y2 - y1
@@ -261,7 +261,7 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1)
             result.append(0.0)
             continue
 
-        root_detail = _region_detail(y1, x1, th, tw)
+        root_detail = _region_detail(sample, y1, x1, th, tw)
         detail_threshold = root_detail * detail_fraction
 
         # heap entries: (-detail, ry, rx, rh, rw)
@@ -304,7 +304,7 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1)
 
             leaf_count += len(children) - 1  # parent replaced by children
             for cy, cx, ch, cw in children:
-                heapq.heappush(heap, (-_region_detail(cy, cx, ch, cw), cy, cx, ch, cw))
+                heapq.heappush(heap, (-_region_detail(sample, cy, cx, ch, cw), cy, cx, ch, cw))
 
         result.append(leaf_count / (th * tw))
     return result
@@ -324,12 +324,6 @@ def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
     _, H, W = sample.shape
     img = torch.zeros(1, H * 8, W * 8, 3)
 
-    def _region_detail(ry, rx, rh, rw):
-        if rh * rw < 2:
-            return 0.0
-        region = sample[:, ry:ry + rh, rx:rx + rw]
-        return region.std(dim=[1, 2]).sum().item()
-
     def _draw_cell(ry, rx, rh, rw):
         py0, py1 = ry * 8, (ry + rh) * 8
         px0, px1 = rx * 8, (rx + rw) * 8
@@ -344,7 +338,7 @@ def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
         if th <= 0 or tw <= 0:
             continue
 
-        root_detail = _region_detail(y1, x1, th, tw)
+        root_detail = _region_detail(sample, y1, x1, th, tw)
         detail_threshold = root_detail * detail_fraction
 
         heap = [(-root_detail, y1, x1, th, tw)]
@@ -384,7 +378,7 @@ def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
                 ]
 
             for cy, cx, ch, cw in children:
-                heapq.heappush(heap, (-_region_detail(cy, cx, ch, cw), cy, cx, ch, cw))
+                heapq.heappush(heap, (-_region_detail(sample, cy, cx, ch, cw), cy, cx, ch, cw))
 
     return img
 
