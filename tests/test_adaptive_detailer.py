@@ -190,13 +190,13 @@ def test_gradient_magnitude_scores_complex_tile_higher_than_flat():
 from node_detailer_adaptive import _tile_quadtree_density
 
 
-def test_tile_quadtree_density_flat_canvas_returns_single_leaf():
-    # Uniform canvas: root detail = 0 <= threshold → root stays as 1 leaf
+def test_tile_quadtree_density_flat_canvas_scores_zero():
+    # Global tree: flat canvas → 1 leaf spanning the whole canvas.
+    # Its center (16,16) is outside the queried tile (0,0,16,16), so score = 0.
     canvas = torch.zeros(1, 4, 32, 32)
     coords = [(0, 0, 16, 16)]
     result = _tile_quadtree_density(canvas, coords)
-    # 1 leaf / (16*16) pixels
-    assert result[0] == pytest.approx(1 / (16 * 16))
+    assert result[0] == pytest.approx(0.0)
 
 
 def test_tile_quadtree_density_complex_higher_than_flat():

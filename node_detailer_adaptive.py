@@ -306,27 +306,20 @@ def _build_canvas_quadtree(canvas, min_cell=4, max_iterations=None):
     return leaves
 
 
-def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
+def _tile_quadtree_density(canvas, tile_coords, min_cell=4):
     """
-    Score tiles by quadtree leaf density in latent space.
+    Score tiles by quadtree leaf density from a single global canvas quadtree.
 
-    Greedily subdivides each tile, always splitting the most heterogeneous node
-    (highest sum of per-channel std devs). A subregion stops being split when its
-    detail drops below detail_fraction of the root tile's detail, or when it would
-    produce children smaller than min_cell in either dimension.
+    Runs one greedy quadtree over the whole canvas (see _build_canvas_quadtree),
+    then scores each tile by counting leaves whose center falls within it:
 
-    Using a fraction of root detail rather than an absolute threshold makes the
-    stopping condition adaptive to each tile's latent distribution — flat regions
-    stop early regardless of overall latent scale, complex regions subdivide deeply.
+        score = leaves_with_center_in_tile / tile_area
 
-    Score = leaf_count / tile_area. Comparable across tiles of different sizes.
-    Higher score → more fine-grained detail in the tile.
-
-    Adapted from a greedy JS quadtree implementation, ported to PyTorch latent tensors
-    instead of Canvas ImageData.
+    Flat tiles score near zero (their regions stay as large leaves whose centers
+    rarely land inside a particular queried tile). Complex tiles score higher
+    (many small leaves concentrated in detailed regions).
     """
-    sample = canvas[0]  # [C, H, W] — batch dim is always 1 in tiled workflows
-
+    leaves = _build_canvas_quadtree(canvas, min_cell)
     result = []
     for (y1, x1, y2, x2) in tile_coords:
         th = y2 - y1
@@ -334,53 +327,11 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1)
         if th <= 0 or tw <= 0:
             result.append(0.0)
             continue
-
-        root_detail = _region_detail(sample, y1, x1, th, tw)
-        detail_threshold = root_detail * detail_fraction
-
-        # heap entries: (-detail, ry, rx, rh, rw)
-        # Python's heapq is a min-heap; negate detail to get max-heap behaviour.
-        heap = [(-root_detail, y1, x1, th, tw)]
-        leaf_count = 1
-
-        while heap:
-            neg_d, ry, rx, rh, rw = heapq.heappop(heap)
-            d = -neg_d
-
-            if d <= detail_threshold:
-                continue  # uniform enough — stays as a leaf
-
-            half_h = rh // 2
-            half_w = rw // 2
-            can_h = half_h >= min_cell
-            can_w = half_w >= min_cell
-
-            if not can_h and not can_w:
-                continue  # too small to split — stays as a leaf
-
-            if can_h and can_w:
-                children = [
-                    (ry,           rx,           half_h,        half_w),
-                    (ry,           rx + half_w,  half_h,        rw - half_w),
-                    (ry + half_h,  rx,           rh - half_h,   half_w),
-                    (ry + half_h,  rx + half_w,  rh - half_h,   rw - half_w),
-                ]
-            elif can_h:
-                children = [
-                    (ry,           rx,  half_h,      rw),
-                    (ry + half_h,  rx,  rh - half_h, rw),
-                ]
-            else:  # can_w only
-                children = [
-                    (ry,  rx,           rh,  half_w),
-                    (ry,  rx + half_w,  rh,  rw - half_w),
-                ]
-
-            leaf_count += len(children) - 1  # parent replaced by children
-            for cy, cx, ch, cw in children:
-                heapq.heappush(heap, (-_region_detail(sample, cy, cx, ch, cw), cy, cx, ch, cw))
-
-        result.append(leaf_count / (th * tw))
+        count = sum(
+            1 for (ry, rx, rh, rw) in leaves
+            if y1 <= ry + rh // 2 < y2 and x1 <= rx + rw // 2 < x2
+        )
+        result.append(count / (th * tw))
     return result
 
 
