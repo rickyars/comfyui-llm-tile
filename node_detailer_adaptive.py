@@ -232,6 +232,80 @@ def _region_detail(sample, ry, rx, rh, rw):
     return sample[:, ry:ry + rh, rx:rx + rw].std(dim=[1, 2]).sum().item()
 
 
+def _build_canvas_quadtree(canvas, min_cell=4, max_iterations=None):
+    """
+    Run a single greedy quadtree over the whole canvas.
+
+    Always splits the highest-detail region first (max-heap). Flat regions
+    never rise to the top of the heap in the presence of complex regions, so
+    they naturally stay as large cells — no threshold required.
+
+    Stopping conditions:
+      - max_iterations budget exhausted (auto-scaled from canvas size if None)
+      - detail <= _QUIET_SCORE_EPSILON (genuinely flat cell)
+      - cell smaller than min_cell in either dimension
+
+    Returns: list of (ry, rx, rh, rw) leaf cells covering the full canvas.
+    """
+    sample = canvas[0]  # [C, H, W]
+    _, H, W = sample.shape
+
+    if max_iterations is None:
+        max_iterations = (H // min_cell) * (W // min_cell) // 2
+
+    root_detail = _region_detail(sample, 0, 0, H, W)
+    heap = [(-root_detail, 0, 0, H, W)]
+    leaves = []
+
+    for _ in range(max_iterations):
+        if not heap:
+            break
+
+        neg_d, ry, rx, rh, rw = heapq.heappop(heap)
+        d = -neg_d
+
+        if d <= _QUIET_SCORE_EPSILON:
+            leaves.append((ry, rx, rh, rw))
+            continue
+
+        half_h = rh // 2
+        half_w = rw // 2
+        can_h = half_h >= min_cell
+        can_w = half_w >= min_cell
+
+        if not can_h and not can_w:
+            leaves.append((ry, rx, rh, rw))
+            continue
+
+        if can_h and can_w:
+            children = [
+                (ry,          rx,           half_h,       half_w),
+                (ry,          rx + half_w,  half_h,       rw - half_w),
+                (ry + half_h, rx,           rh - half_h,  half_w),
+                (ry + half_h, rx + half_w,  rh - half_h,  rw - half_w),
+            ]
+        elif can_h:
+            children = [
+                (ry,          rx,  half_h,      rw),
+                (ry + half_h, rx,  rh - half_h, rw),
+            ]
+        else:
+            children = [
+                (ry, rx,          rh,  half_w),
+                (ry, rx + half_w, rh,  rw - half_w),
+            ]
+
+        for cy, cx, ch, cw in children:
+            heapq.heappush(heap, (-_region_detail(sample, cy, cx, ch, cw), cy, cx, ch, cw))
+
+    # Budget exhausted — flush remaining heap entries as leaves
+    while heap:
+        _, ry, rx, rh, rw = heapq.heappop(heap)
+        leaves.append((ry, rx, rh, rw))
+
+    return leaves
+
+
 def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
     """
     Score tiles by quadtree leaf density in latent space.

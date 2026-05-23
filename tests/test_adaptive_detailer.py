@@ -221,3 +221,42 @@ def test_tile_quadtree_density_ranks_tiles_correctly():
 def test_scoring_method_enum_includes_quadtree_density():
     methods = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]["scoring_method"][0]
     assert "quadtree_density" in methods
+
+
+from node_detailer_adaptive import _build_canvas_quadtree
+
+
+def test_build_canvas_quadtree_flat_returns_one_leaf():
+    # Flat canvas: root detail <= epsilon, stays as the single leaf.
+    canvas = torch.zeros(1, 4, 32, 32)
+    leaves = _build_canvas_quadtree(canvas)
+    assert len(leaves) == 1
+    assert leaves[0] == (0, 0, 32, 32)
+
+
+def test_build_canvas_quadtree_complex_returns_multiple_leaves():
+    torch.manual_seed(42)
+    canvas = torch.randn(1, 4, 32, 32)
+    leaves = _build_canvas_quadtree(canvas)
+    assert len(leaves) > 1
+
+
+def test_build_canvas_quadtree_leaves_partition_canvas():
+    # Leaves must cover exactly H*W latent cells (no gaps, no overlaps).
+    torch.manual_seed(42)
+    canvas = torch.randn(1, 4, 32, 32)
+    leaves = _build_canvas_quadtree(canvas)
+    total_area = sum(rh * rw for (ry, rx, rh, rw) in leaves)
+    assert total_area == 32 * 32
+
+
+def test_build_canvas_quadtree_complex_region_gets_more_leaves():
+    # Bottom-right quadrant is complex; top-left is flat.
+    # Global heap spends budget on the complex region.
+    torch.manual_seed(0)
+    canvas = torch.zeros(1, 4, 32, 32)
+    canvas[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    leaves = _build_canvas_quadtree(canvas)
+    flat_leaves = [l for l in leaves if l[0] < 16 and l[1] < 16]
+    complex_leaves = [l for l in leaves if l[0] >= 16 and l[1] >= 16]
+    assert len(complex_leaves) > len(flat_leaves)
