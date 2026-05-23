@@ -303,6 +303,97 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_threshold=0.0
     return result
 
 
+def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_threshold=0.01):
+    """
+    Build a pixel-space visualization of the quadtree subdivision.
+
+    Runs the same greedy subdivision as _tile_quadtree_density and draws each
+    leaf cell as a filled rectangle (viridis color = cell detail) with 2-pixel
+    white borders. Useful for diagnosing which regions subdivide densely vs. coarsely.
+
+    Returns: IMAGE tensor [1, H*8, W*8, 3]
+    """
+    sample = canvas[0]  # [C, H, W]
+    _, H, W = sample.shape
+    img = torch.zeros(1, H * 8, W * 8, 3)
+
+    def _region_detail(ry, rx, rh, rw):
+        if rh * rw < 2:
+            return 0.0
+        region = sample[:, ry:ry + rh, rx:rx + rw]
+        return region.std(dim=[1, 2]).sum().item()
+
+    # Collect all leaf cells across every tile
+    all_leaves = []  # (detail, ry, rx, rh, rw)
+    for (y1, x1, y2, x2) in tile_coords:
+        th = y2 - y1
+        tw = x2 - x1
+        if th <= 0 or tw <= 0:
+            continue
+
+        heap = [(-_region_detail(y1, x1, th, tw), y1, x1, th, tw)]
+        while heap:
+            neg_d, ry, rx, rh, rw = heapq.heappop(heap)
+            d = -neg_d
+
+            if d <= detail_threshold:
+                all_leaves.append((d, ry, rx, rh, rw))
+                continue
+
+            half_h = rh // 2
+            half_w = rw // 2
+            can_h = half_h >= min_cell
+            can_w = half_w >= min_cell
+
+            if not can_h and not can_w:
+                all_leaves.append((d, ry, rx, rh, rw))
+                continue
+
+            if can_h and can_w:
+                children = [
+                    (ry,           rx,           half_h,        half_w),
+                    (ry,           rx + half_w,  half_h,        rw - half_w),
+                    (ry + half_h,  rx,           rh - half_h,   half_w),
+                    (ry + half_h,  rx + half_w,  rh - half_h,   rw - half_w),
+                ]
+            elif can_h:
+                children = [
+                    (ry,           rx,  half_h,      rw),
+                    (ry + half_h,  rx,  rh - half_h, rw),
+                ]
+            else:
+                children = [
+                    (ry,  rx,           rh,  half_w),
+                    (ry,  rx + half_w,  rh,  rw - half_w),
+                ]
+
+            for cy, cx, ch, cw in children:
+                heapq.heappush(heap, (-_region_detail(cy, cx, ch, cw), cy, cx, ch, cw))
+
+    if not all_leaves:
+        return img
+
+    # Normalize detail globally so colors are comparable across tiles
+    details = [d for d, _, _, _, _ in all_leaves]
+    d_min, d_max = min(details), max(details)
+
+    for d, ry, rx, rh, rw in all_leaves:
+        t = (d - d_min) / (d_max - d_min) if d_max > d_min else 0.5
+        rc, gc, bc = _t_to_rgb(t)
+        py0, py1 = ry * 8, (ry + rh) * 8
+        px0, px1 = rx * 8, (rx + rw) * 8
+        img[0, py0:py1, px0:px1, 0] = rc
+        img[0, py0:py1, px0:px1, 1] = gc
+        img[0, py0:py1, px0:px1, 2] = bc
+        # 2-pixel white cell borders
+        img[0, py0:min(py0 + 2, py1), px0:px1, :] = 1.0
+        img[0, max(py1 - 2, py0):py1, px0:px1, :] = 1.0
+        img[0, py0:py1, px0:min(px0 + 2, px1), :] = 1.0
+        img[0, py0:py1, max(px1 - 2, px0):px1, :] = 1.0
+
+    return img
+
+
 class LLMAdaptiveTileDetailer:
 
     @classmethod
@@ -372,7 +463,7 @@ class LLMAdaptiveTileDetailer:
             scoring_map_img = None
         elif scoring_method == "quadtree_density":
             scores = _tile_quadtree_density(canvas, tile_coords)
-            scoring_map_img = None
+            scoring_map_img = _build_quadtree_map(canvas, tile_coords)
         else:
             raise ValueError(f"Unknown scoring_method: {scoring_method!r}")
 
