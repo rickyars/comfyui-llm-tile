@@ -184,3 +184,40 @@ def test_gradient_magnitude_scores_complex_tile_higher_than_flat():
     flat_score = _tile_complexity(canvas_flat, coords)
     complex_score = _tile_complexity(canvas_complex, coords)
     assert flat_score[0] < complex_score[0]
+
+
+from node_detailer_adaptive import _tile_quadtree_density
+
+
+def test_tile_quadtree_density_flat_canvas_returns_single_leaf():
+    # Uniform canvas: root detail = 0 <= threshold → root stays as 1 leaf
+    canvas = torch.zeros(1, 4, 32, 32)
+    coords = [(0, 0, 16, 16)]
+    result = _tile_quadtree_density(canvas, coords)
+    # 1 leaf / (16*16) pixels
+    assert result[0] == pytest.approx(1 / (16 * 16))
+
+
+def test_tile_quadtree_density_complex_higher_than_flat():
+    torch.manual_seed(42)
+    canvas_complex = torch.randn(1, 4, 32, 32)
+    canvas_flat = torch.zeros(1, 4, 32, 32)
+    coords = [(0, 0, 16, 16)]
+    flat_score = _tile_quadtree_density(canvas_flat, coords)
+    complex_score = _tile_quadtree_density(canvas_complex, coords)
+    assert complex_score[0] > flat_score[0]
+
+
+def test_tile_quadtree_density_ranks_tiles_correctly():
+    # Top-left quadrant: zeros (flat). Bottom-right: random (complex).
+    torch.manual_seed(99)
+    canvas = torch.zeros(1, 4, 32, 32)
+    canvas[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    coords = [(0, 0, 16, 16), (16, 16, 32, 32)]
+    result = _tile_quadtree_density(canvas, coords)
+    assert result[0] < result[1]
+
+
+def test_scoring_method_enum_includes_quadtree_density():
+    methods = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]["scoring_method"][0]
+    assert "quadtree_density" in methods

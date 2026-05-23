@@ -1,3 +1,4 @@
+import heapq
 import torch
 import comfy.sample
 import comfy.model_management
@@ -223,6 +224,83 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
         img[0, py0:py1, max(px1 - 2, px0):px1, :] = 1.0
 
     return img
+
+
+def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_threshold=0.01):
+    """
+    Score tiles by quadtree leaf density in latent space.
+
+    Greedily subdivides each tile, always splitting the most heterogeneous node
+    (highest sum of per-channel std devs). Stops when every remaining node either
+    has detail <= detail_threshold (uniform enough) or would produce children
+    smaller than min_cell in the split direction.
+
+    Score = leaf_count / tile_area. Comparable across tiles of different sizes.
+    Higher score → more fine-grained detail in the tile.
+
+    Ported from the greedy quadtree in E:/projects/pixelator/studio/quadtree-builder.js,
+    adapted to operate on PyTorch latent tensors instead of Canvas ImageData.
+    """
+    sample = canvas[0]  # [C, H, W] — batch dim is always 1 in tiled workflows
+
+    def _region_detail(ry, rx, rh, rw):
+        if rh * rw < 2:
+            return 0.0
+        region = sample[:, ry:ry + rh, rx:rx + rw]  # [C, rH, rW]
+        return region.std(dim=[1, 2]).sum().item()
+
+    result = []
+    for (y1, x1, y2, x2) in tile_coords:
+        th = y2 - y1
+        tw = x2 - x1
+        if th <= 0 or tw <= 0:
+            result.append(0.0)
+            continue
+
+        # heap entries: (-detail, ry, rx, rh, rw)
+        # Python's heapq is a min-heap; negate detail to get max-heap behaviour.
+        heap = [(-_region_detail(y1, x1, th, tw), y1, x1, th, tw)]
+        leaf_count = 1
+
+        while heap:
+            neg_d, ry, rx, rh, rw = heapq.heappop(heap)
+            d = -neg_d
+
+            if d <= detail_threshold:
+                continue  # uniform enough — stays as a leaf
+
+            half_h = rh // 2
+            half_w = rw // 2
+            can_h = half_h >= min_cell
+            can_w = half_w >= min_cell
+
+            if not can_h and not can_w:
+                continue  # too small to split — stays as a leaf
+
+            if can_h and can_w:
+                children = [
+                    (ry,           rx,           half_h,        half_w),
+                    (ry,           rx + half_w,  half_h,        rw - half_w),
+                    (ry + half_h,  rx,           rh - half_h,   half_w),
+                    (ry + half_h,  rx + half_w,  rh - half_h,   rw - half_w),
+                ]
+            elif can_h:
+                children = [
+                    (ry,           rx,  half_h,      rw),
+                    (ry + half_h,  rx,  rh - half_h, rw),
+                ]
+            else:  # can_w only
+                children = [
+                    (ry,  rx,           rh,  half_w),
+                    (ry,  rx + half_w,  rh,  rw - half_w),
+                ]
+
+            leaf_count += len(children) - 1  # parent replaced by children
+            for cy, cx, ch, cw in children:
+                heapq.heappush(heap, (-_region_detail(cy, cx, ch, cw), cy, cx, ch, cw))
+
+        result.append(leaf_count / (th * tw))
+    return result
 
 
 class LLMAdaptiveTileDetailer:
