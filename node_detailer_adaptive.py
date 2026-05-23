@@ -243,7 +243,7 @@ class LLMAdaptiveTileDetailer:
                 "cfg": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "step": 0.1}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "scoring_method": (["otsu_threshold"], {"default": "otsu_threshold"}),
+                "scoring_method": (["otsu_threshold", "gradient_magnitude", "quadtree_density"], {"default": "otsu_threshold"}),
                 "denoise_min": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "denoise_max": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "curve": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 5.0, "step": 0.01}),
@@ -254,7 +254,7 @@ class LLMAdaptiveTileDetailer:
         }
 
     RETURN_TYPES = ("LATENT", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("refined_latent", "denoise_map", "otsu_map")
+    RETURN_NAMES = ("refined_latent", "denoise_map", "scoring_map")
     FUNCTION = "detail"
     CATEGORY = "image/generation"
 
@@ -288,13 +288,21 @@ class LLMAdaptiveTileDetailer:
 
         if scoring_method == "otsu_threshold":
             scores = _tile_otsu_scores(canvas, tile_coords)
-            otsu_map_img = _build_otsu_map(canvas)
+            scoring_map_img = _build_otsu_map(canvas)
+        elif scoring_method == "gradient_magnitude":
+            scores = _tile_complexity(canvas, tile_coords)
+            scoring_map_img = None
+        elif scoring_method == "quadtree_density":
+            scores = _tile_quadtree_density(canvas, tile_coords)
+            scoring_map_img = None
         else:
-            raise ValueError(f"Unknown scoring_method: {scoring_method}")
+            raise ValueError(f"Unknown scoring_method: {scoring_method!r}")
 
         scores = _smooth_scores(scores, rows + 1, cols + 1)
         td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
         denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows)
+        if scoring_map_img is None:
+            scoring_map_img = denoise_map_img
 
         # --- Pass 2: sample each tile with its computed denoise ---
         pbar = ProgressBar(len(tile_coords))
@@ -332,9 +340,9 @@ class LLMAdaptiveTileDetailer:
             y2_c, x2_c = tile_coords[-1][2], tile_coords[cols][3]
             canvas = canvas[:, :, y1_c:y2_c, x1_c:x2_c]
             denoise_map_img = denoise_map_img[:, y1_c * 8:y2_c * 8, x1_c * 8:x2_c * 8, :]
-            otsu_map_img = otsu_map_img[:, y1_c * 8:y2_c * 8, x1_c * 8:x2_c * 8, :]
+            scoring_map_img = scoring_map_img[:, y1_c * 8:y2_c * 8, x1_c * 8:x2_c * 8, :]
 
-        return ({"samples": canvas}, denoise_map_img, otsu_map_img)
+        return ({"samples": canvas}, denoise_map_img, scoring_map_img)
 
 
 NODE_CLASS_MAPPINGS = {
