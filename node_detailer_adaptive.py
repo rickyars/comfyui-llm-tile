@@ -226,14 +226,18 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
     return img
 
 
-def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_threshold=0.01):
+def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
     """
     Score tiles by quadtree leaf density in latent space.
 
     Greedily subdivides each tile, always splitting the most heterogeneous node
-    (highest sum of per-channel std devs). Stops when every remaining node either
-    has detail <= detail_threshold (uniform enough) or would produce children
-    smaller than min_cell in the split direction.
+    (highest sum of per-channel std devs). A subregion stops being split when its
+    detail drops below detail_fraction of the root tile's detail, or when it would
+    produce children smaller than min_cell in either dimension.
+
+    Using a fraction of root detail rather than an absolute threshold makes the
+    stopping condition adaptive to each tile's latent distribution — flat regions
+    stop early regardless of overall latent scale, complex regions subdivide deeply.
 
     Score = leaf_count / tile_area. Comparable across tiles of different sizes.
     Higher score → more fine-grained detail in the tile.
@@ -257,9 +261,12 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_threshold=0.0
             result.append(0.0)
             continue
 
+        root_detail = _region_detail(y1, x1, th, tw)
+        detail_threshold = root_detail * detail_fraction
+
         # heap entries: (-detail, ry, rx, rh, rw)
         # Python's heapq is a min-heap; negate detail to get max-heap behaviour.
-        heap = [(-_region_detail(y1, x1, th, tw), y1, x1, th, tw)]
+        heap = [(-root_detail, y1, x1, th, tw)]
         leaf_count = 1
 
         while heap:
@@ -303,17 +310,17 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_threshold=0.0
     return result
 
 
-def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_threshold=0.01):
+def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_fraction=0.1):
     """
     Build a pixel-space visualization of the quadtree subdivision.
 
-    Runs the same greedy subdivision as _tile_quadtree_density and draws each
-    leaf cell as a filled rectangle (viridis color = cell detail) with 2-pixel
-    white borders. Useful for diagnosing which regions subdivide densely vs. coarsely.
+    Runs the same greedy subdivision as _tile_quadtree_density and draws white
+    cell outlines on a dark background. Large cells = flat regions that stopped
+    subdividing early. Small cells = detailed regions that subdivided deeply.
 
     Returns: IMAGE tensor [1, H*8, W*8, 3]
     """
-    sample = canvas[0]  # [C, H, W]
+    sample = canvas[0]
     _, H, W = sample.shape
     img = torch.zeros(1, H * 8, W * 8, 3)
 
@@ -323,21 +330,30 @@ def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_threshold=0.01):
         region = sample[:, ry:ry + rh, rx:rx + rw]
         return region.std(dim=[1, 2]).sum().item()
 
-    # Collect all leaf cells across every tile
-    all_leaves = []  # (detail, ry, rx, rh, rw)
+    def _draw_cell(ry, rx, rh, rw):
+        py0, py1 = ry * 8, (ry + rh) * 8
+        px0, px1 = rx * 8, (rx + rw) * 8
+        img[0, py0:min(py0 + 2, py1), px0:px1, :] = 1.0
+        img[0, max(py1 - 2, py0):py1, px0:px1, :] = 1.0
+        img[0, py0:py1, px0:min(px0 + 2, px1), :] = 1.0
+        img[0, py0:py1, max(px1 - 2, px0):px1, :] = 1.0
+
     for (y1, x1, y2, x2) in tile_coords:
         th = y2 - y1
         tw = x2 - x1
         if th <= 0 or tw <= 0:
             continue
 
-        heap = [(-_region_detail(y1, x1, th, tw), y1, x1, th, tw)]
+        root_detail = _region_detail(y1, x1, th, tw)
+        detail_threshold = root_detail * detail_fraction
+
+        heap = [(-root_detail, y1, x1, th, tw)]
         while heap:
             neg_d, ry, rx, rh, rw = heapq.heappop(heap)
             d = -neg_d
 
             if d <= detail_threshold:
-                all_leaves.append((d, ry, rx, rh, rw))
+                _draw_cell(ry, rx, rh, rw)
                 continue
 
             half_h = rh // 2
@@ -346,7 +362,7 @@ def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_threshold=0.01):
             can_w = half_w >= min_cell
 
             if not can_h and not can_w:
-                all_leaves.append((d, ry, rx, rh, rw))
+                _draw_cell(ry, rx, rh, rw)
                 continue
 
             if can_h and can_w:
@@ -369,27 +385,6 @@ def _build_quadtree_map(canvas, tile_coords, min_cell=4, detail_threshold=0.01):
 
             for cy, cx, ch, cw in children:
                 heapq.heappush(heap, (-_region_detail(cy, cx, ch, cw), cy, cx, ch, cw))
-
-    if not all_leaves:
-        return img
-
-    # Normalize detail globally so colors are comparable across tiles
-    details = [d for d, _, _, _, _ in all_leaves]
-    d_min, d_max = min(details), max(details)
-
-    for d, ry, rx, rh, rw in all_leaves:
-        t = (d - d_min) / (d_max - d_min) if d_max > d_min else 0.5
-        rc, gc, bc = _t_to_rgb(t)
-        py0, py1 = ry * 8, (ry + rh) * 8
-        px0, px1 = rx * 8, (rx + rw) * 8
-        img[0, py0:py1, px0:px1, 0] = rc
-        img[0, py0:py1, px0:px1, 1] = gc
-        img[0, py0:py1, px0:px1, 2] = bc
-        # 2-pixel white cell borders
-        img[0, py0:min(py0 + 2, py1), px0:px1, :] = 1.0
-        img[0, max(py1 - 2, py0):py1, px0:px1, :] = 1.0
-        img[0, py0:py1, px0:min(px0 + 2, px1), :] = 1.0
-        img[0, py0:py1, max(px1 - 2, px0):px1, :] = 1.0
 
     return img
 
