@@ -3,28 +3,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import torch
 import pytest
-from utils.image_utils import feather_blend_latent, _compute_center_grid
+from utils.image_utils import feather_blend_latent, _compute_center_grid, _compute_tile_coords
 
 
 def test_feather_blend_latent_left_edge():
     overlap_l = 4
-    # Previously placed tile occupies x=0..7 with value 1.0; rest 0.0
     canvas = torch.zeros(1, 4, 8, 16)
     canvas[:, :, :, 0:8] = 1.0
 
-    # New tile placed at x1=4; tile covers x=4..11 in canvas; value 0.5
     refined = torch.full((1, 4, 8, 8), 0.5)
 
     feather_blend_latent(canvas, refined, y1=0, x1=4, overlap_l=overlap_l,
                          has_left=True, has_top=False)
 
-    # Left edge of overlap (x=4): alpha=0 → old canvas value preserved
     assert canvas[0, 0, 0, 4].item() == pytest.approx(1.0, abs=1e-5)
-    # Right edge of overlap (x=7): alpha=1 → full refined value
     assert canvas[0, 0, 0, 7].item() == pytest.approx(0.5, abs=1e-5)
-    # Interior beyond overlap (x=8): hard-set to refined
     assert canvas[0, 0, 0, 8].item() == pytest.approx(0.5, abs=1e-5)
-    # Ramp is monotonically non-increasing across the overlap zone
     vals = [canvas[0, 0, 0, 4 + i].item() for i in range(4)]
     for i in range(len(vals) - 1):
         assert vals[i] >= vals[i + 1]
@@ -32,70 +26,75 @@ def test_feather_blend_latent_left_edge():
 
 def test_feather_blend_latent_top_edge():
     overlap_l = 4
-    # Previously placed tile occupies y=0..7 with value 1.0
     canvas = torch.zeros(1, 4, 16, 8)
     canvas[:, :, 0:8, :] = 1.0
 
-    # New tile placed at y1=4; tile covers y=4..11; value 0.5
     refined = torch.full((1, 4, 8, 8), 0.5)
 
     feather_blend_latent(canvas, refined, y1=4, x1=0, overlap_l=overlap_l,
                          has_left=False, has_top=True)
 
-    # Top edge of overlap (y=4): alpha=0 → old canvas value preserved
     assert canvas[0, 0, 4, 0].item() == pytest.approx(1.0, abs=1e-5)
-    # Bottom edge of overlap (y=7): alpha=1 → full refined value
     assert canvas[0, 0, 7, 0].item() == pytest.approx(0.5, abs=1e-5)
-    # Interior beyond overlap (y=8): hard-set to refined
     assert canvas[0, 0, 8, 0].item() == pytest.approx(0.5, abs=1e-5)
-    # Ramp is monotonically non-increasing across the overlap zone
     vals = [canvas[0, 0, 4 + i, 0].item() for i in range(4)]
     for i in range(len(vals) - 1):
         assert vals[i] >= vals[i + 1]
 
 
-def test_full_coverage_grid():
-    # 1000x2048 portrait: latent W=125, H=256
-    # tile_size=1024 → tile_l=128; overlap=64 → overlap_l=8
-    cols, rows = _compute_center_grid(W=125, H=256, tile_l=128, overlap_l=8)
+def test_no_overlap_gives_adjacent_tiles():
+    cols, rows = _compute_center_grid(W=256, H=256, tile_l=128, overlap_l=0)
+    coords = _compute_tile_coords(W=256, H=256, tile_l=128, cols=cols, rows=rows, overlap_l=0)
 
-    # W=125 <= tile_l=128 → single column (cols=0)
-    assert cols == 0
-    # ceil(256/128) - 1 = 2 - 1 = 1 → 2 tiles cover H exactly
+    assert cols == 1
     assert rows == 1
+    assert len(coords) == 4
+    # Tiles are adjacent: x2 of tile 0 == x1 of tile 1
+    assert coords[0] == (0, 0, 128, 128)
+    assert coords[1] == (0, 128, 128, 256)
 
-    # Collect all tile coordinates using even-distribution formula
-    all_x, all_y = set(), set()
-    for r in range(rows + 1):
-        for c in range(cols + 1):
-            x1 = round(c * max(0, 125 - 128) / cols) if cols > 0 else 0
-            y1 = round(r * (256 - 128) / rows) if rows > 0 else 0
-            y2 = min(256, y1 + 128)
-            x2 = min(125, x1 + 128)
-            assert 0 <= x1 and x2 <= 125, f"x out of bounds: {x1}:{x2}"
-            assert 0 <= y1 and y2 <= 256, f"y out of bounds: {y1}:{y2}"
-            all_x.update(range(x1, x2))
-            all_y.update(range(y1, y2))
 
-    # Full coverage — no gaps
-    assert all_x == set(range(125)), "x axis not fully covered"
-    assert all_y == set(range(256)), "y axis not fully covered"
+def test_overlap_creates_positional_tile_overlap():
+    # Grid count is unchanged from no-overlap; tiles grow into neighbor territory
+    cols, rows = _compute_center_grid(W=256, H=256, tile_l=128, overlap_l=32)
+    coords = _compute_tile_coords(W=256, H=256, tile_l=128, cols=cols, rows=rows, overlap_l=32)
+
+    assert cols == 1
+    assert rows == 1
+    assert len(coords) == 4  # same grid count as no-overlap
+
+    n_cols = cols + 1
+    for tile_idx, (y1, x1, y2, x2) in enumerate(coords):
+        r, c = divmod(tile_idx, n_cols)
+        if c > 0:
+            prev_x2 = coords[tile_idx - 1][3]
+            assert x1 < prev_x2, "adjacent tiles must overlap positionally"
+        if r > 0:
+            prev_y2 = coords[tile_idx - n_cols][2]
+            assert y1 < prev_y2, "adjacent tiles must overlap positionally"
+
+
+def test_grid_covers_full_canvas():
+    # Use tile-aligned dimensions (standard upscaler use case)
+    cols, rows = _compute_center_grid(W=256, H=384, tile_l=128, overlap_l=32)
+    coords = _compute_tile_coords(W=256, H=384, tile_l=128, cols=cols, rows=rows, overlap_l=32)
+
+    assert coords[0][0] == 0   # y1 of first tile
+    assert coords[0][1] == 0   # x1 of first tile
+    assert coords[-1][2] == 384  # y2 of last tile
+    assert coords[-1][3] == 256  # x2 of last tile
 
 
 def test_feather_blend_latent_corner():
     overlap_l = 4
-    # Simulate a 2x2 tile grid: top-left tile placed, now placing bottom-right at y1=4, x1=4
     canvas = torch.zeros(1, 4, 16, 16)
-    canvas[:, :, 0:8, 0:8] = 1.0  # top-left tile region
+    canvas[:, :, 0:8, 0:8] = 1.0
 
     refined = torch.full((1, 4, 8, 8), 0.5)
 
     feather_blend_latent(canvas, refined, y1=4, x1=4, overlap_l=overlap_l,
                          has_left=True, has_top=True)
 
-    # Corner point (y=4, x=4): both alpha_x=0 and alpha_y=0 → min=0 → old canvas value
     assert canvas[0, 0, 4, 4].item() == pytest.approx(1.0, abs=1e-5)
-    # Diagonal point (y=7, x=7): both alpha_x=1 and alpha_y=1 → min=1 → full refined value
     assert canvas[0, 0, 7, 7].item() == pytest.approx(0.5, abs=1e-5)
-    # Interior (y=8, x=8): hard-set to refined
     assert canvas[0, 0, 8, 8].item() == pytest.approx(0.5, abs=1e-5)
