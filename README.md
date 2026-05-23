@@ -164,33 +164,33 @@ The tile grid uses whole user-sized tiles centered on the image. If the image si
 
 ### Adaptive Tiled Image Detailer
 
-Measures each tile before sampling it, then scales the denoise strength accordingly. The current scoring method is `otsu_threshold`: the node builds a global Otsu threshold over latent intensity, treats pixels above that threshold as the bright class, and scores each tile by how much bright-class coverage it contains.
+Measures each tile before sampling it, then scales the denoise strength accordingly. Three scoring methods are available: `otsu_threshold`, `gradient_magnitude`, and `quadtree_density`.
 
-Outputs three things: the refined latent, a denoise map, and an Otsu map. The denoise map is a tile heatmap using the viridis colormap (dark purple = low denoise, teal = mid, yellow = high denoise). The Otsu map is a black/white debug image where white means latent intensity was above the Otsu threshold.
+Outputs three things: the refined latent, a denoise map, and a scoring map. The denoise map is a tile heatmap using the viridis colormap (dark purple = low denoise, teal = mid, yellow = high denoise). The scoring map is a debug visualization specific to the active scoring method.
 
 #### How it works
 
 **Pass 1** computes the centered whole-tile grid once. The same tile coordinates are used for scoring, the denoise heatmap, and sampling.
 
-For `otsu_threshold`, the node averages latent channels into a single intensity map, normalizes it to [0, 1], computes a global Otsu threshold, and creates a bright-class mask:
-
-```
-bright = intensity > otsu_threshold
-```
-
-Each tile's raw score is the fraction of that tile covered by the bright class. A tile with no bright-class pixels scores 0.0; a tile that is half bright-class scores 0.5; a fully bright-class tile scores 1.0.
-
-Tile scores are then normalized to [0, 1] within the image (lowest-scoring tile = 0, highest-scoring tile = 1), mapped through the `curve` exponent, and scaled to [denoise_min, denoise_max].
+Tile scores are normalized to [0, 1] within the image (lowest-scoring tile = 0, highest-scoring tile = 1), mapped through the `curve` exponent, and scaled to [denoise_min, denoise_max].
 
 After scoring, each tile's raw score is blended with the average of its 4-connected neighbors (70% own, 30% neighbor average). This prevents abrupt denoise jumps between adjacent tiles while preserving the coarse adaptive distribution.
 
 **Pass 2** runs the standard sampling loop with each tile's computed denoise value.
 
+#### Scoring methods
+
+**`otsu_threshold`** — Averages latent channels into a single intensity map, normalizes to [0, 1], computes a global Otsu threshold, and scores each tile by its fraction of bright-class (above-threshold) pixels. The scoring map is a black/white image where white = above threshold. Works well when the image has a clear bimodal intensity distribution.
+
+**`gradient_magnitude`** — Computes the sum of absolute latent gradients per tile. Tiles with sharp edges and high-frequency content score high; flat, blurry, or uniform tiles score near zero. The scoring map is a per-pixel gradient magnitude image. Good for images where visual sharpness or edge density determines where detail is needed.
+
+**`quadtree_density`** — Runs a single greedy quadtree over the entire canvas using a max-heap, then scores each tile by how many quadtree leaf cells have their center within it. Regions with high detail subdivide into many small leaves; flat regions stay as large leaves naturally, with no threshold required. The scoring map shows the quadtree cell outlines (white on black) — large cells = flat, small cells = complex. Budget is auto-scaled from canvas dimensions so no parameters are exposed.
+
 #### Parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `scoring_method` | `otsu_threshold` | How tile scores are computed. Currently only Otsu bright-class coverage is available. |
+| `scoring_method` | `otsu_threshold` | `otsu_threshold`, `gradient_magnitude`, or `quadtree_density` |
 | `denoise_min` | 0.05 | Denoise applied to the lowest-scoring tile. Near zero freezes it. |
 | `denoise_max` | 0.35 | Denoise applied to the highest-scoring tile. |
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |

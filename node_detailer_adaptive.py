@@ -251,7 +251,7 @@ def _build_canvas_quadtree(canvas, min_cell=4, max_iterations=None):
     _, H, W = sample.shape
 
     if max_iterations is None:
-        max_iterations = (H // min_cell) * (W // min_cell) // 2
+        max_iterations = (H // min_cell) * (W // min_cell) // 8
 
     root_detail = _region_detail(sample, 0, 0, H, W)
     heap = [(-root_detail, 0, 0, H, W)]
