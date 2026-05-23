@@ -1,6 +1,7 @@
 import torch
 import pytest
 from node_detailer_adaptive import _tile_complexity, _otsu_threshold, _tile_otsu_scores, _build_otsu_map
+from node_detailer_adaptive import _build_canvas_quadtree
 
 
 def test_tile_complexity_flat_returns_zero():
@@ -223,9 +224,6 @@ def test_scoring_method_enum_includes_quadtree_density():
     assert "quadtree_density" in methods
 
 
-from node_detailer_adaptive import _build_canvas_quadtree
-
-
 def test_build_canvas_quadtree_flat_returns_one_leaf():
     # Flat canvas: root detail <= epsilon, stays as the single leaf.
     canvas = torch.zeros(1, 4, 32, 32)
@@ -238,25 +236,28 @@ def test_build_canvas_quadtree_complex_returns_multiple_leaves():
     torch.manual_seed(42)
     canvas = torch.randn(1, 4, 32, 32)
     leaves = _build_canvas_quadtree(canvas)
-    assert len(leaves) > 1
+    assert len(leaves) > 4
 
 
 def test_build_canvas_quadtree_leaves_partition_canvas():
-    # Leaves must cover exactly H*W latent cells (no gaps, no overlaps).
+    # Every latent cell must be covered by exactly one leaf (no gaps, no overlaps).
     torch.manual_seed(42)
     canvas = torch.randn(1, 4, 32, 32)
     leaves = _build_canvas_quadtree(canvas)
-    total_area = sum(rh * rw for (ry, rx, rh, rw) in leaves)
-    assert total_area == 32 * 32
+    coverage = torch.zeros(32, 32, dtype=torch.int)
+    for (ry, rx, rh, rw) in leaves:
+        coverage[ry:ry + rh, rx:rx + rw] += 1
+    assert (coverage == 1).all()
 
 
 def test_build_canvas_quadtree_complex_region_gets_more_leaves():
     # Bottom-right quadrant is complex; top-left is flat.
-    # Global heap spends budget on the complex region.
+    # Global heap spends budget on the complex region — it should have more leaves.
     torch.manual_seed(0)
     canvas = torch.zeros(1, 4, 32, 32)
     canvas[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
     leaves = _build_canvas_quadtree(canvas)
-    flat_leaves = [l for l in leaves if l[0] < 16 and l[1] < 16]
+    # Count leaves whose origin AND full extent lie within each quadrant
+    flat_leaves = [l for l in leaves if l[0] + l[2] <= 16 and l[1] + l[3] <= 16]
     complex_leaves = [l for l in leaves if l[0] >= 16 and l[1] >= 16]
     assert len(complex_leaves) > len(flat_leaves)
