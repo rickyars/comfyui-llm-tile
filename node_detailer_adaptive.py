@@ -238,8 +238,8 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4, detail_threshold=0.0
     Score = leaf_count / tile_area. Comparable across tiles of different sizes.
     Higher score → more fine-grained detail in the tile.
 
-    Ported from the greedy quadtree in E:/projects/pixelator/studio/quadtree-builder.js,
-    adapted to operate on PyTorch latent tensors instead of Canvas ImageData.
+    Adapted from a greedy JS quadtree implementation, ported to PyTorch latent tensors
+    instead of Canvas ImageData.
     """
     sample = canvas[0]  # [C, H, W] — batch dim is always 1 in tiled workflows
 
