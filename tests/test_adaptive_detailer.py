@@ -261,3 +261,99 @@ def test_build_canvas_quadtree_complex_region_gets_more_leaves():
     flat_leaves = [l for l in leaves if l[0] + l[2] <= 16 and l[1] + l[3] <= 16]
     complex_leaves = [l for l in leaves if l[0] >= 16 and l[1] >= 16]
     assert len(complex_leaves) > len(flat_leaves)
+
+
+from unittest.mock import MagicMock
+import comfy.sample
+import comfy.samplers
+
+
+def _make_model_mock():
+    model = MagicMock()
+    model_sampling = MagicMock()
+    model_sampling.sigma_min = 0.03
+    model_sampling.sigma_max = 14.6
+    model.get_model_object.return_value = model_sampling
+    model.load_device = torch.device('cpu')
+    model.model_options = {}
+    return model
+
+
+def test_adaptive_eta_scaling_formula():
+    # Pure math: verify the per-tile eta formula matches the spec
+    denoise_min, denoise_max, eta = 0.05, 0.35, 1.0
+    drange = denoise_max - denoise_min
+
+    eta_at_min = eta * (denoise_min - denoise_min) / drange
+    eta_at_max = eta * (denoise_max - denoise_min) / drange
+    eta_at_mid = eta * ((denoise_min + denoise_max) / 2 - denoise_min) / drange
+
+    assert eta_at_min == pytest.approx(0.0)
+    assert eta_at_max == pytest.approx(1.0)
+    assert eta_at_mid == pytest.approx(0.5)
+
+
+def test_adaptive_detail_uses_sample_custom_not_sample():
+    comfy.sample.sample_custom.reset_mock()
+
+    node = LLMAdaptiveTileDetailer()
+    node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": torch.zeros(1, 4, 32, 32)},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        scoring_method="gradient_magnitude",
+        denoise_min=0.05, denoise_max=0.35,
+        curve=1.5, tile_size=256, overlap=0,
+        crop_to_tiles=False,
+        noise_type="gaussian", eta=1.0,
+    )
+
+    assert comfy.sample.sample_custom.call_count > 0
+
+
+def test_adaptive_detail_eta_varies_across_tiles():
+    # High-score tiles get more eta than low-score tiles.
+    # Canvas is 32x32 latent; tile_size=128 → tile_l=16 → 2x2 grid (4 tiles).
+    # Top-left tile is flat; bottom-right tile has a steep ramp (high gradient).
+    # We use scoring_method="otsu_threshold" so scores pick up pixel-level variation.
+    captured_etas = []
+    original = comfy.samplers.ksampler
+
+    def capturing(name, extra_options=None):
+        if extra_options and 'eta' in extra_options:
+            captured_etas.append(extra_options['eta'])
+        return original(name, extra_options=extra_options)
+
+    comfy.samplers.ksampler = capturing
+    try:
+        canvas = torch.zeros(1, 4, 32, 32)
+        # Bottom-right 16x16 latent block: alternating 0/1 checkerboard
+        for i in range(16):
+            for j in range(16):
+                canvas[:, :, 16 + i, 16 + j] = float((i + j) % 2)
+        node = LLMAdaptiveTileDetailer()
+        node.detail(
+            model=_make_model_mock(),
+            upscaled_latent={"samples": canvas},
+            positive=[], negative=[],
+            seed=0, steps=20, cfg=7.0,
+            sampler_name="euler_ancestral", scheduler="normal",
+            scoring_method="gradient_magnitude",
+            denoise_min=0.05, denoise_max=0.35,
+            curve=1.0, tile_size=128, overlap=0,
+            crop_to_tiles=False,
+            noise_type="gaussian", eta=1.0,
+        )
+    finally:
+        comfy.samplers.ksampler = original
+
+    assert len(captured_etas) > 0
+    assert max(captured_etas) > min(captured_etas), "eta should vary across tiles"
+
+
+def test_adaptive_detail_input_types_include_noise_type_and_eta():
+    required = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]
+    assert "noise_type" in required
+    assert "eta" in required

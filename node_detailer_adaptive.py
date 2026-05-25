@@ -5,11 +5,18 @@ import comfy.model_management
 import comfy.samplers
 from comfy.utils import ProgressBar
 
-# Support both relative imports (in package) and direct imports (in tests)
 if __package__:
-    from .utils import feather_blend_latent, _compute_center_grid, _compute_tile_coords
+    from .utils import (
+        feather_blend_latent, _compute_center_grid, _compute_tile_coords,
+        check_eta_support, prepare_noise_typed, build_tile_sampler,
+        NOISE_GENERATOR_NAMES_SIMPLE,
+    )
 else:
-    from utils import feather_blend_latent, _compute_center_grid, _compute_tile_coords
+    from utils import (
+        feather_blend_latent, _compute_center_grid, _compute_tile_coords,
+        check_eta_support, prepare_noise_typed, build_tile_sampler,
+        NOISE_GENERATOR_NAMES_SIMPLE,
+    )
 
 
 def _tile_complexity(canvas, tile_coords):
@@ -384,6 +391,9 @@ class LLMAdaptiveTileDetailer:
                 "tile_size": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 8}),
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
                 "crop_to_tiles": ("BOOLEAN", {"default": False}),
+                "noise_type": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
+                "eta": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
+                                  "tooltip": "Maximum SDE noise injection. Scales to 0 at denoise_min; full value at denoise_max. Use 'rk_beta' sampler for full RES4LYF eta control."}),
             }
         }
 
@@ -394,7 +404,8 @@ class LLMAdaptiveTileDetailer:
 
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler,
-               scoring_method, denoise_min, denoise_max, curve, tile_size, overlap, crop_to_tiles):
+               scoring_method, denoise_min, denoise_max, curve,
+               tile_size, overlap, crop_to_tiles, noise_type, eta):
 
         canvas = upscaled_latent["samples"].clone()
         _, _, H, W = canvas.shape
@@ -412,6 +423,15 @@ class LLMAdaptiveTileDetailer:
         print(f"[LLMAdaptiveTileDetailer] Latent {W}x{H} | "
               f"tile_l={tile_l} overlap_l={overlap_l} stride={stride} | "
               f"grid cols={cols} rows={rows} ({(rows+1)*(cols+1)} tiles)")
+
+        model_sampling = model.get_model_object("model_sampling")
+        sigma_min = float(model_sampling.sigma_min)
+        sigma_max = float(model_sampling.sigma_max)
+        eta_supported = check_eta_support(sampler_name)
+        if eta > 0.0 and not eta_supported:
+            print(f"[LLMAdaptiveTileDetailer] Warning: '{sampler_name}' does not support "
+                  f"eta; eta will be ignored. Use 'rk_beta' for full RES4LYF eta control.")
+        drange = denoise_max - denoise_min
 
         # --- Pass 1: collect valid tile coords and measure complexity ---
         tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l)
@@ -438,7 +458,7 @@ class LLMAdaptiveTileDetailer:
         if scoring_map_img is None:
             scoring_map_img = denoise_map_img
 
-        # --- Pass 2: sample each tile with its computed denoise ---
+        # --- Pass 2: sample each tile with its computed denoise and scaled eta ---
         pbar = ProgressBar(len(tile_coords))
         n_cols = cols + 1
         for tile_idx, (y1, x1, y2, x2) in enumerate(tile_coords):
@@ -450,14 +470,27 @@ class LLMAdaptiveTileDetailer:
             print(f"[LLMAdaptiveTileDetailer] tile ({r},{c}) "
                   f"{scoring_method}={score:.4f} t={t_val:.2f} denoise={tile_denoise:.3f}")
 
+            if tile_denoise <= 0.0:
+                pbar.update(1)
+                continue
+
+            tile_eta = eta * (tile_denoise - denoise_min) / drange if drange > 0 else 0.0
             tile_seed = seed + tile_idx
             tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
 
-            noise = comfy.sample.prepare_noise(tile_latent, tile_seed, None)
-            refined = comfy.sample.sample(
-                model, noise, steps, cfg, sampler_name, scheduler,
+            if tile_denoise >= 1.0:
+                tile_sigmas = comfy.samplers.calculate_sigmas(model_sampling, scheduler, steps)
+            else:
+                new_steps = int(steps / tile_denoise)
+                tile_sigmas = comfy.samplers.calculate_sigmas(
+                    model_sampling, scheduler, new_steps)[-(steps + 1):]
+            tile_sigmas = tile_sigmas.to(model.load_device)
+
+            tile_sampler = build_tile_sampler(sampler_name, tile_eta, eta_supported)
+            noise = prepare_noise_typed(tile_latent, tile_seed, noise_type, sigma_min, sigma_max)
+            refined = comfy.sample.sample_custom(
+                model, noise, cfg, tile_sampler, tile_sigmas,
                 positive, negative, tile_latent,
-                denoise=tile_denoise,
             )
 
             feather_blend_latent(
