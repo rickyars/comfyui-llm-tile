@@ -22,8 +22,12 @@ def _make_comfy_stubs():
     ksample.SCHEDULERS = []
     comfy.samplers.KSampler = ksample
 
-    # ProgressBar stub
-    comfy.utils.ProgressBar = unittest.mock.MagicMock
+    # ProgressBar stub: a no-op class (using MagicMock directly fails because
+    # MagicMock(total) interprets the int arg as spec=int, leaving no .update())
+    class _ProgressBar:
+        def __init__(self, total): pass
+        def update(self, value=1): pass
+    comfy.utils.ProgressBar = _ProgressBar
 
     # prepare_noise — returns zeros matching the input shape
     comfy.sample.prepare_noise = unittest.mock.MagicMock(

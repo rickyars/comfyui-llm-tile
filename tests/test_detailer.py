@@ -98,3 +98,77 @@ def test_feather_blend_latent_corner():
     assert canvas[0, 0, 4, 4].item() == pytest.approx(1.0, abs=1e-5)
     assert canvas[0, 0, 7, 7].item() == pytest.approx(0.5, abs=1e-5)
     assert canvas[0, 0, 8, 8].item() == pytest.approx(0.5, abs=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: eta and noise_type inputs
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock
+import comfy.sample
+import comfy.samplers
+
+
+def _make_model_mock():
+    model = MagicMock()
+    model_sampling = MagicMock()
+    model_sampling.sigma_min = 0.03
+    model_sampling.sigma_max = 14.6
+    model.get_model_object.return_value = model_sampling
+    model.load_device = torch.device('cpu')
+    model.model_options = {}
+    return model
+
+
+def test_detail_uses_sample_custom_not_sample():
+    from node_detailer import LLMTileSequentialDetailer
+    comfy.sample.sample_custom.reset_mock()
+
+    node = LLMTileSequentialDetailer()
+    node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": torch.zeros(1, 4, 32, 32)},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=256, overlap=0,
+        crop_to_tiles=False,
+        noise_type="gaussian", eta=0.0,
+    )
+
+    assert comfy.sample.sample_custom.call_count > 0
+
+
+def test_detail_eta_nonzero_passes_eta_to_ksampler():
+    from node_detailer import LLMTileSequentialDetailer
+    captured = []
+    original = comfy.samplers.ksampler
+
+    def capturing(name, extra_options=None):
+        captured.append(dict(extra_options) if extra_options else {})
+        return original(name, extra_options=extra_options)
+
+    comfy.samplers.ksampler = capturing
+    try:
+        node = LLMTileSequentialDetailer()
+        node.detail(
+            model=_make_model_mock(),
+            upscaled_latent={"samples": torch.zeros(1, 4, 32, 32)},
+            positive=[], negative=[],
+            seed=0, steps=20, cfg=7.0,
+            sampler_name="euler_ancestral", scheduler="normal",
+            denoise=0.25, tile_size=256, overlap=0,
+            crop_to_tiles=False,
+            noise_type="gaussian", eta=0.8,
+        )
+    finally:
+        comfy.samplers.ksampler = original
+
+    assert any(opts.get('eta') == 0.8 for opts in captured)
+
+
+def test_detail_input_types_include_noise_type_and_eta():
+    from node_detailer import LLMTileSequentialDetailer
+    required = LLMTileSequentialDetailer.INPUT_TYPES()["required"]
+    assert "noise_type" in required
+    assert "eta" in required

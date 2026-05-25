@@ -4,7 +4,19 @@ import comfy.model_management
 import comfy.samplers
 from comfy.utils import ProgressBar
 
-from .utils import feather_blend_latent, _compute_center_grid, _compute_tile_coords
+# Support both relative imports (in package) and direct imports (in tests)
+if __package__:
+    from .utils import (
+        feather_blend_latent, _compute_center_grid, _compute_tile_coords,
+        check_eta_support, prepare_noise_typed, build_tile_sampler,
+        NOISE_GENERATOR_NAMES_SIMPLE,
+    )
+else:
+    from utils import (
+        feather_blend_latent, _compute_center_grid, _compute_tile_coords,
+        check_eta_support, prepare_noise_typed, build_tile_sampler,
+        NOISE_GENERATOR_NAMES_SIMPLE,
+    )
 
 
 class LLMTileSequentialDetailer:
@@ -29,6 +41,9 @@ class LLMTileSequentialDetailer:
                 "tile_size": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 8}),
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
                 "crop_to_tiles": ("BOOLEAN", {"default": False}),
+                "noise_type": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
+                "eta": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01,
+                                  "tooltip": "SDE noise injection per step. 0 = deterministic ODE. Only applies to samplers that support eta (e.g. euler_ancestral, rk_beta)."}),
             }
         }
 
@@ -38,7 +53,8 @@ class LLMTileSequentialDetailer:
     CATEGORY = "image/generation"
 
     def detail(self, model, upscaled_latent, positive, negative,
-               seed, steps, cfg, sampler_name, scheduler, denoise, tile_size, overlap, crop_to_tiles):
+               seed, steps, cfg, sampler_name, scheduler, denoise,
+               tile_size, overlap, crop_to_tiles, noise_type, eta):
 
         canvas = upscaled_latent["samples"].clone()
         _, _, H, W = canvas.shape
@@ -58,6 +74,23 @@ class LLMTileSequentialDetailer:
               f"tile_l={tile_l} overlap_l={overlap_l} stride={stride} | "
               f"grid cols={cols} rows={rows} ({total_tiles} tiles)")
 
+        model_sampling = model.get_model_object("model_sampling")
+        sigma_min = float(model_sampling.sigma_min)
+        sigma_max = float(model_sampling.sigma_max)
+        eta_supported = check_eta_support(sampler_name)
+        if eta > 0.0 and not eta_supported:
+            print(f"[LLMTileSequentialDetailer] Warning: '{sampler_name}' does not support "
+                  f"eta; eta will be ignored. Use 'rk_beta' for full RES4LYF eta control.")
+
+        if denoise >= 1.0:
+            tile_sigmas = comfy.samplers.calculate_sigmas(model_sampling, scheduler, steps)
+        else:
+            new_steps = int(steps / denoise)
+            tile_sigmas = comfy.samplers.calculate_sigmas(
+                model_sampling, scheduler, new_steps)[-(steps + 1):]
+        tile_sigmas = tile_sigmas.to(model.load_device)
+        sampler = build_tile_sampler(sampler_name, eta, eta_supported)
+
         pbar = ProgressBar(total_tiles)
         tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l)
         n_cols = cols + 1
@@ -68,11 +101,10 @@ class LLMTileSequentialDetailer:
             tile_seed = seed + tile_idx
             tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
 
-            noise = comfy.sample.prepare_noise(tile_latent, tile_seed, None)
-            refined = comfy.sample.sample(
-                model, noise, steps, cfg, sampler_name, scheduler,
+            noise = prepare_noise_typed(tile_latent, tile_seed, noise_type, sigma_min, sigma_max)
+            refined = comfy.sample.sample_custom(
+                model, noise, cfg, sampler, tile_sigmas,
                 positive, negative, tile_latent,
-                denoise=denoise,
             )
 
             feather_blend_latent(
