@@ -2,6 +2,7 @@
 # which would cause relative import errors in __init__.py
 import sys
 import os
+import torch
 
 # Stub out comfy.* so pure-function tests can import node_detailer_adaptive
 # without needing a live ComfyUI installation
@@ -15,7 +16,7 @@ def _make_comfy_stubs():
     comfy.samplers = ModuleType('comfy.samplers')
     comfy.utils = ModuleType('comfy.utils')
 
-    # KSampler stub with empty lists (enough for INPUT_TYPES to not crash)
+    # KSampler stub
     ksample = ModuleType('comfy.samplers.KSampler')
     ksample.SAMPLERS = []
     ksample.SCHEDULERS = []
@@ -23,6 +24,48 @@ def _make_comfy_stubs():
 
     # ProgressBar stub
     comfy.utils.ProgressBar = unittest.mock.MagicMock
+
+    # prepare_noise — returns zeros matching the input shape
+    comfy.sample.prepare_noise = unittest.mock.MagicMock(
+        side_effect=lambda latent, seed, inds: torch.zeros_like(latent)
+    )
+
+    # sample_custom — returns a clone of latent_image (arg index 7)
+    comfy.sample.sample_custom = unittest.mock.MagicMock(
+        side_effect=lambda model, noise, cfg, sampler, sigmas, pos, neg, latent, **kw: latent.clone()
+    )
+
+    # k_diffusion_sampling stub — two functions: one with eta, one without
+    k_diff = ModuleType('comfy.samplers.k_diffusion_sampling')
+    def _sample_with_eta(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1.0):
+        pass
+    def _sample_without_eta(model, x, sigmas, extra_args=None, callback=None, disable=None):
+        pass
+    k_diff.sample_euler_ancestral = _sample_with_eta
+    k_diff.sample_euler = _sample_without_eta
+    comfy.samplers.k_diffusion_sampling = k_diff
+    sys.modules['comfy.samplers.k_diffusion_sampling'] = k_diff
+
+    # ksampler — returns a mock whose extra_options matches what was passed
+    def _mock_ksampler(name, extra_options=None):
+        m = unittest.mock.MagicMock()
+        m.extra_options = dict(extra_options) if extra_options else {}
+        return m
+    comfy.samplers.ksampler = _mock_ksampler
+
+    # calculate_sigmas — returns a 21-element descending tensor (20 steps + endpoint)
+    comfy.samplers.calculate_sigmas = unittest.mock.MagicMock(
+        return_value=torch.linspace(14.6, 0.0, 21)
+    )
+
+    # model_management utilities
+    comfy.model_management.soft_empty_cache = unittest.mock.MagicMock()
+    comfy.model_management.intermediate_device = unittest.mock.MagicMock(
+        return_value=torch.device('cpu')
+    )
+    comfy.model_management.intermediate_dtype = unittest.mock.MagicMock(
+        return_value=torch.float32
+    )
 
     sys.modules['comfy'] = comfy
     sys.modules['comfy.sample'] = comfy.sample
