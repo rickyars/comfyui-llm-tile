@@ -392,8 +392,10 @@ class LLMAdaptiveTileDetailer:
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
                 "crop_to_tiles": ("BOOLEAN", {"default": False}),
                 "noise_type": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
-                "eta": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
-                                  "tooltip": "Maximum SDE noise injection. Scales to 0 at denoise_min; full value at denoise_max. Use 'rk_beta' sampler for full RES4LYF eta control."}),
+                "eta_min": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01,
+                                      "tooltip": "Eta for lowest-denoise tiles. 0 = deterministic ODE. Eta-compatible samplers: euler_ancestral, dpmpp_sde, dpmpp_2s_ancestral, dpmpp_2m_sde, dpmpp_3m_sde, rk_beta."}),
+                "eta_max": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
+                                      "tooltip": "Eta for highest-denoise tiles. Scales linearly from eta_min (at denoise_min) to eta_max (at denoise_max)."}),
             }
         }
 
@@ -405,7 +407,7 @@ class LLMAdaptiveTileDetailer:
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler,
                scoring_method, denoise_min, denoise_max, curve,
-               tile_size, overlap, crop_to_tiles, noise_type, eta):
+               tile_size, overlap, crop_to_tiles, noise_type, eta_min, eta_max):
 
         canvas = upscaled_latent["samples"].clone()
         _, _, H, W = canvas.shape
@@ -428,9 +430,9 @@ class LLMAdaptiveTileDetailer:
         sigma_min = float(model_sampling.sigma_min)
         sigma_max = float(model_sampling.sigma_max)
         eta_supported = check_eta_support(sampler_name)
-        if eta > 0.0 and not eta_supported:
+        if eta_max > 0.0 and not eta_supported:
             print(f"[LLMAdaptiveTileDetailer] Warning: '{sampler_name}' does not support "
-                  f"eta; eta will be ignored. Use 'rk_beta' for full RES4LYF eta control.")
+                  f"eta; eta_min/eta_max will be ignored. Use an ancestral sampler or 'rk_beta'.")
         drange = denoise_max - denoise_min
 
         # --- Pass 1: collect valid tile coords and measure complexity ---
@@ -474,7 +476,8 @@ class LLMAdaptiveTileDetailer:
                 pbar.update(1)
                 continue
 
-            tile_eta = eta * (tile_denoise - denoise_min) / drange if drange > 0 else 0.0
+            t_eta = (tile_denoise - denoise_min) / drange if drange > 0 else 0.0
+            tile_eta = eta_min + (eta_max - eta_min) * t_eta
             tile_seed = seed + tile_idx
             tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
 

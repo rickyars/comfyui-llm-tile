@@ -42,8 +42,8 @@ class LLMTileSequentialDetailer:
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
                 "crop_to_tiles": ("BOOLEAN", {"default": False}),
                 "noise_type": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
-                "eta": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01,
-                                  "tooltip": "SDE noise injection per step. 0 = deterministic ODE. Only applies to samplers that support eta (e.g. euler_ancestral, rk_beta)."}),
+                "eta": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
+                                  "tooltip": "SDE noise injection per step. 0 = deterministic. 1 = standard ancestral. Compatible samplers: euler_ancestral, dpmpp_sde, dpmpp_2s_ancestral, dpmpp_2m_sde, dpmpp_3m_sde, rk_beta. ODE samplers ignore this."}),
             }
         }
 

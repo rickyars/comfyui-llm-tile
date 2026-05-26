@@ -307,7 +307,7 @@ def test_adaptive_detail_uses_sample_custom_not_sample():
         denoise_min=0.05, denoise_max=0.35,
         curve=1.5, tile_size=256, overlap=0,
         crop_to_tiles=False,
-        noise_type="gaussian", eta=1.0,
+        noise_type="gaussian", eta_min=0.0, eta_max=1.0,
     )
 
     assert comfy.sample.sample_custom.call_count > 0
@@ -344,7 +344,7 @@ def test_adaptive_detail_eta_varies_across_tiles():
             denoise_min=0.05, denoise_max=0.35,
             curve=1.0, tile_size=128, overlap=0,
             crop_to_tiles=False,
-            noise_type="gaussian", eta=1.0,
+            noise_type="gaussian", eta_min=0.0, eta_max=1.0,
         )
     finally:
         comfy.samplers.ksampler = original
@@ -356,4 +356,5 @@ def test_adaptive_detail_eta_varies_across_tiles():
 def test_adaptive_detail_input_types_include_noise_type_and_eta():
     required = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]
     assert "noise_type" in required
-    assert "eta" in required
+    assert "eta_min" in required
+    assert "eta_max" in required
