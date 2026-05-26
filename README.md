@@ -157,6 +157,8 @@ Applies a single denoise value to every tile. Good starting point; use when the 
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones using a smoothstep curve to hide seams. |
 | `crop_to_tiles` | false | Crop the output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and the outer strips are left untouched. Enable this to remove those strips from the output. |
+| `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is the standard ComfyUI default. Other types (brownian, uniform, etc.) require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). |
+| `eta` | 1.0 | SDE noise injection per step. 0 = deterministic (ODE path). 1 = standard ancestral. Only applies to ancestral/SDE samplers: `euler_ancestral`, `dpmpp_sde`, `dpmpp_2s_ancestral`, `dpmpp_2m_sde`, `dpmpp_3m_sde`, `rk_beta`. ODE samplers (`euler`, `dpm++_2m`, etc.) ignore this. Values above 1.0 inject more noise than the SDE derivation calls for — adds texture but risks incoherence at low denoise. |
 
 The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, small outside strips are left untouched rather than creating partial edge tiles.
 
@@ -197,6 +199,9 @@ After scoring, each tile's raw score is blended with the average of its 4-connec
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended using a smoothstep curve to hide seams. |
 | `crop_to_tiles` | false | Crop output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and outer strips are left untouched. Enable this to remove those strips from the output latent and debug images. |
+| `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is standard. Other types require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). `brownian` is a good first alternative for portraits and fabric. |
+| `eta_min` | 0.0 | Eta applied to the lowest-denoise tiles. 0 = deterministic ODE for those tiles. Only applies to ancestral/SDE samplers (see Tiled Image Detailer note above). |
+| `eta_max` | 1.0 | Eta applied to the highest-denoise tiles. Scales linearly from `eta_min` at `denoise_min` to `eta_max` at `denoise_max`. Values above 1.0 amplify noise beyond the SDE derivation — useful for texture but risky above 1.3. |
 
 #### How `curve` works
 
