@@ -357,6 +357,7 @@ def test_adaptive_detail_input_types_include_noise_type_and_eta():
     required = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]
     assert "noise_type" in required
     assert "eta_min" in required
+    assert "eta_max" in required
     assert "edge_mode" in required
     assert "crop_to_tiles" not in required
 
@@ -396,7 +397,8 @@ def test_adaptive_edge_mode_crop_shrinks_canvas_and_maps():
         **_adaptive_common(),
     )
     cs = canvas["samples"].shape
-    assert cs[2] < 40 and cs[3] < 44
+    # 40x44 latent, tile_l=16 -> centered 2x2 grid crops to exactly 32x32
+    assert cs[2] == 32 and cs[3] == 32
     assert denoise_map.shape[1] == cs[2] * 8 and denoise_map.shape[2] == cs[3] * 8
     assert scoring_map.shape[1] == cs[2] * 8 and scoring_map.shape[2] == cs[3] * 8
 

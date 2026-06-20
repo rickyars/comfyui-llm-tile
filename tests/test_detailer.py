@@ -280,7 +280,8 @@ def test_edge_mode_crop_shrinks_output():
         noise_type="gaussian", eta=0.0,
     )
     s = out[0]["samples"].shape
-    assert s[2] < 40 and s[3] < 44
+    # 40x44 latent, tile_l=16 -> centered 2x2 grid crops to exactly 32x32
+    assert s[2] == 32 and s[3] == 32
 
 
 def test_edge_mode_center_keeps_original_shape():
