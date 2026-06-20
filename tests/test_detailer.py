@@ -298,3 +298,37 @@ def test_edge_mode_center_keeps_original_shape():
         noise_type="gaussian", eta=0.0,
     )
     assert out[0]["samples"].shape == latent.shape
+
+
+def test_edge_mode_pad_blends_diffused_content_into_margins():
+    # Round-trip check: prove pad mode actually writes diffused tile content
+    # into the (cropped-back) output, not just that it returns the right shape.
+    # Override the stub so each tile comes back clearly modified (+100), then
+    # confirm the original-size output differs from the input everywhere.
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+
+    original = comfy.sample.sample_custom
+    comfy.sample.sample_custom = MagicMock(
+        side_effect=lambda model, noise, cfg, sampler, sigmas, pos, neg, lat, **kw: lat + 100.0
+    )
+    try:
+        out = node.detail(
+            model=_make_model_mock(),
+            upscaled_latent={"samples": latent.clone()},
+            positive=[], negative=[],
+            seed=0, steps=20, cfg=7.0,
+            sampler_name="euler", scheduler="normal",
+            denoise=0.25, tile_size=128, overlap=0,
+            edge_mode="pad",
+            noise_type="gaussian", eta=0.0,
+        )
+    finally:
+        comfy.sample.sample_custom = original
+
+    result = out[0]["samples"]
+    assert result.shape == latent.shape
+    # Every pixel of the original region is covered by a diffused tile, so the
+    # whole output should be shifted by +100 vs the input (no undetailed margin).
+    assert torch.all(result > latent + 50.0)
