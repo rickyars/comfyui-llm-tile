@@ -156,11 +156,11 @@ Applies a single denoise value to every tile. Good starting point; use when the 
 | `denoise` | 0.25 | Applied uniformly to every tile |
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones using a smoothstep curve to hide seams. |
-| `crop_to_tiles` | false | Crop the output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and the outer strips are left untouched. Enable this to remove those strips from the output. |
+| `edge_mode` | `center` | How the grid edges are handled when the image size is not a multiple of `tile_size`. `center`: diffuse the centered grid and leave the outer strips as the original upscale (output keeps original size). `crop`: crop the output down to the detailed region. `pad`: edge-replicate the latent out to a full tile grid, diffuse everything (including the strips), then crop back to original size — worst case roughly +1 tile row/column of compute. |
 | `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is the standard ComfyUI default. Other types (brownian, uniform, etc.) require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). |
 | `eta` | 1.0 | SDE noise injection per step. 0 = deterministic (ODE path). 1 = standard ancestral. Only applies to ancestral/SDE samplers: `euler_ancestral`, `dpmpp_sde`, `dpmpp_2s_ancestral`, `dpmpp_2m_sde`, `dpmpp_3m_sde`, `rk_beta`. ODE samplers (`euler`, `dpm++_2m`, etc.) ignore this. Values above 1.0 inject more noise than the SDE derivation calls for — adds texture but risks incoherence at low denoise. |
 
-The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, small outside strips are left untouched rather than creating partial edge tiles.
+The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, the outside strips are not covered by the centered grid; use `edge_mode` to control them — `center` leaves them untouched, `crop` removes them, and `pad` edge-replicates the latent to a full grid so they get detailed too (then crops back to the original size).
 
 ---
 
@@ -198,7 +198,7 @@ After scoring, each tile's raw score is blended with the average of its 4-connec
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended using a smoothstep curve to hide seams. |
-| `crop_to_tiles` | false | Crop output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and outer strips are left untouched. Enable this to remove those strips from the output latent and debug images. |
+| `edge_mode` | `center` | How the grid edges are handled when the image size is not a multiple of `tile_size`. `center`: diffuse the centered grid and leave the outer strips as the original upscale. `crop`: crop the output latent and debug images down to the detailed region. `pad`: edge-replicate the latent out to a full tile grid, diffuse everything, then crop back to original size (debug maps are cropped to match). Worst case roughly +1 tile row/column of compute. |
 | `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is standard. Other types require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). `brownian` is a good first alternative for portraits and fabric. |
 | `eta_min` | 0.0 | Eta applied to the lowest-denoise tiles. 0 = deterministic ODE for those tiles. Only applies to ancestral/SDE samplers (see Tiled Image Detailer note above). |
 | `eta_max` | 1.0 | Eta applied to the highest-denoise tiles. Scales linearly from `eta_min` at `denoise_min` to `eta_max` at `denoise_max`. Values above 1.0 amplify noise beyond the SDE derivation — useful for texture but risky above 1.3. |
