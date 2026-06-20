@@ -172,3 +172,46 @@ def test_detail_input_types_include_noise_type_and_eta():
     required = LLMTileSequentialDetailer.INPUT_TYPES()["required"]
     assert "noise_type" in required
     assert "eta" in required
+
+
+# ---------------------------------------------------------------------------
+# Task: pad_latent_to_grid
+# ---------------------------------------------------------------------------
+
+from utils.image_utils import pad_latent_to_grid
+
+
+def test_pad_latent_to_grid_pads_to_tile_multiple():
+    canvas = torch.zeros(1, 4, 100, 140)  # neither dim a multiple of 64
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=64)
+    assert padded.shape[2] == 128  # ceil(100/64)*64
+    assert padded.shape[3] == 192  # ceil(140/64)*64
+
+
+def test_pad_latent_to_grid_symmetric_split():
+    canvas = torch.zeros(1, 4, 100, 140)
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=64)
+    # height pad total = 28 -> top 14, bottom 14
+    assert pad_top == 14
+    # width pad total = 52 -> left 26, right 26
+    assert pad_left == 26
+
+
+def test_pad_latent_to_grid_replicate_fill_matches_border():
+    canvas = torch.arange(16, dtype=torch.float32).reshape(1, 1, 4, 4)
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=8)
+    # padded interior region equals original
+    inner = padded[:, :, pad_top:pad_top + 4, pad_left:pad_left + 4]
+    assert torch.equal(inner, canvas)
+    # the column just left of the content equals the content's left border (replicate)
+    left_border = canvas[:, :, :, 0]
+    pad_col = padded[:, :, pad_top:pad_top + 4, pad_left - 1]
+    assert torch.equal(pad_col, left_border)
+
+
+def test_pad_latent_to_grid_zero_pad_when_aligned():
+    canvas = torch.zeros(1, 4, 128, 256)  # both multiples of 128
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=128)
+    assert padded.shape == canvas.shape
+    assert (pad_top, pad_left) == (0, 0)
+    assert padded is canvas  # no-op returns the same tensor

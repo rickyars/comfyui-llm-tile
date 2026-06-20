@@ -227,6 +227,32 @@ def _compute_center_grid(W, H, tile_l, overlap_l):
     return cols, rows
 
 
+def pad_latent_to_grid(canvas, tile_l):
+    """Edge-replicate pad a latent canvas out to whole tile_l multiples.
+
+    Returns (padded_canvas, (pad_top, pad_left)). Padding is split
+    symmetrically on each axis. An axis already a multiple of tile_l receives
+    zero padding; if both axes are aligned the original tensor is returned
+    unchanged. The (pad_top, pad_left) offsets locate the original region
+    inside the padded canvas so callers can crop back afterward.
+    """
+    _, _, H, W = canvas.shape
+    Hp = ((H + tile_l - 1) // tile_l) * tile_l
+    Wp = ((W + tile_l - 1) // tile_l) * tile_l
+    pad_h = Hp - H
+    pad_w = Wp - W
+    if pad_h == 0 and pad_w == 0:
+        return canvas, (0, 0)
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    padded = F.pad(
+        canvas, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate"
+    )
+    return padded, (pad_top, pad_left)
+
+
 def _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l=0):
     """
     Return row-major tile coordinates in latent space.
