@@ -9,13 +9,13 @@ if __package__:
     from .utils import (
         feather_blend_latent, _compute_center_grid, _compute_tile_coords,
         check_eta_support, prepare_noise_typed, build_tile_sampler,
-        NOISE_GENERATOR_NAMES_SIMPLE,
+        NOISE_GENERATOR_NAMES_SIMPLE, pad_latent_to_grid,
     )
 else:
     from utils import (
         feather_blend_latent, _compute_center_grid, _compute_tile_coords,
         check_eta_support, prepare_noise_typed, build_tile_sampler,
-        NOISE_GENERATOR_NAMES_SIMPLE,
+        NOISE_GENERATOR_NAMES_SIMPLE, pad_latent_to_grid,
     )
 
 
@@ -40,7 +40,7 @@ class LLMTileSequentialDetailer:
                 "denoise": ("FLOAT", {"default": 0.25, "min": 0.05, "max": 1.0, "step": 0.01}),
                 "tile_size": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 8}),
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
-                "crop_to_tiles": ("BOOLEAN", {"default": False}),
+                "edge_mode": (["center", "crop", "pad"], {"default": "center", "tooltip": "center: diffuse centered grid, leave edge margins as the original upscale (original size). crop: crop output to the detailed region. pad: edge-replicate to a full tile grid, diffuse everything, crop back to original size."}),
                 "noise_type": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
                 "eta": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
                                   "tooltip": "SDE noise injection per step. 0 = deterministic. 1 = standard ancestral. Compatible samplers: euler_ancestral, dpmpp_sde, dpmpp_2s_ancestral, dpmpp_2m_sde, dpmpp_3m_sde, rk_beta. ODE samplers ignore this."}),
@@ -54,12 +54,16 @@ class LLMTileSequentialDetailer:
 
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler, denoise,
-               tile_size, overlap, crop_to_tiles, noise_type, eta):
+               tile_size, overlap, edge_mode, noise_type, eta):
 
         canvas = upscaled_latent["samples"].clone()
-        _, _, H, W = canvas.shape
+        _, _, H0, W0 = canvas.shape
 
         tile_l = tile_size // 8
+        pad_top = pad_left = 0
+        if edge_mode == "pad":
+            canvas, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l)
+        _, _, H, W = canvas.shape
         overlap_l = overlap // 8
         if overlap_l >= tile_l:
             overlap_l = tile_l // 2
@@ -116,10 +120,12 @@ class LLMTileSequentialDetailer:
             comfy.model_management.soft_empty_cache()
             pbar.update(1)
 
-        if crop_to_tiles:
+        if edge_mode == "crop":
             y1_c, x1_c = tile_coords[0][0], tile_coords[0][1]
             y2_c, x2_c = tile_coords[-1][2], tile_coords[cols][3]
             canvas = canvas[:, :, y1_c:y2_c, x1_c:x2_c]
+        elif edge_mode == "pad":
+            canvas = canvas[:, :, pad_top:pad_top + H0, pad_left:pad_left + W0]
 
         return ({"samples": canvas},)
 

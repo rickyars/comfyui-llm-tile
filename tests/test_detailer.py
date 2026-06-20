@@ -132,7 +132,7 @@ def test_detail_uses_sample_custom_not_sample():
         seed=0, steps=20, cfg=7.0,
         sampler_name="euler", scheduler="normal",
         denoise=0.25, tile_size=256, overlap=0,
-        crop_to_tiles=False,
+        edge_mode="center",
         noise_type="gaussian", eta=0.0,
     )
 
@@ -158,7 +158,7 @@ def test_detail_eta_nonzero_passes_eta_to_ksampler():
             seed=0, steps=20, cfg=7.0,
             sampler_name="euler_ancestral", scheduler="normal",
             denoise=0.25, tile_size=256, overlap=0,
-            crop_to_tiles=False,
+            edge_mode="center",
             noise_type="gaussian", eta=0.8,
         )
     finally:
@@ -172,6 +172,8 @@ def test_detail_input_types_include_noise_type_and_eta():
     required = LLMTileSequentialDetailer.INPUT_TYPES()["required"]
     assert "noise_type" in required
     assert "eta" in required
+    assert "edge_mode" in required
+    assert "crop_to_tiles" not in required
 
 
 # ---------------------------------------------------------------------------
@@ -215,3 +217,84 @@ def test_pad_latent_to_grid_zero_pad_when_aligned():
     assert padded.shape == canvas.shape
     assert (pad_top, pad_left) == (0, 0)
     assert padded is canvas  # no-op returns the same tensor
+
+
+# ---------------------------------------------------------------------------
+# Task: edge_mode (sequential)
+# ---------------------------------------------------------------------------
+
+def test_edge_mode_pad_returns_original_shape():
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    # 40x44 latent, tile_l=16 (tile_size=128) -> not tile-aligned
+    latent = torch.randn(1, 4, 40, 44)
+    out = node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": latent.clone()},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0,
+        edge_mode="pad",
+        noise_type="gaussian", eta=0.0,
+    )
+    assert out[0]["samples"].shape == latent.shape
+
+
+def test_edge_mode_pad_details_former_margins():
+    # sample_custom (stubbed) returns latent.clone(), so diffused regions are
+    # unchanged vs input. To prove the margin tiles RAN, count sample_custom
+    # calls: pad mode must invoke more tiles than center mode for the same input.
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    common = dict(
+        model=_make_model_mock(), positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0, sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0, noise_type="gaussian", eta=0.0,
+    )
+
+    comfy.sample.sample_custom.reset_mock()
+    node.detail(upscaled_latent={"samples": latent.clone()}, edge_mode="center", **common)
+    center_calls = comfy.sample.sample_custom.call_count
+
+    comfy.sample.sample_custom.reset_mock()
+    node.detail(upscaled_latent={"samples": latent.clone()}, edge_mode="pad", **common)
+    pad_calls = comfy.sample.sample_custom.call_count
+
+    assert pad_calls > center_calls
+
+
+def test_edge_mode_crop_shrinks_output():
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    out = node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": latent.clone()},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0,
+        edge_mode="crop",
+        noise_type="gaussian", eta=0.0,
+    )
+    s = out[0]["samples"].shape
+    assert s[2] < 40 and s[3] < 44
+
+
+def test_edge_mode_center_keeps_original_shape():
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    out = node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": latent.clone()},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0,
+        edge_mode="center",
+        noise_type="gaussian", eta=0.0,
+    )
+    assert out[0]["samples"].shape == latent.shape
