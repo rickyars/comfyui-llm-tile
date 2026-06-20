@@ -306,7 +306,7 @@ def test_adaptive_detail_uses_sample_custom_not_sample():
         scoring_method="gradient_magnitude",
         denoise_min=0.05, denoise_max=0.35,
         curve=1.5, tile_size=256, overlap=0,
-        crop_to_tiles=False,
+        edge_mode="center",
         noise_type="gaussian", eta_min=0.0, eta_max=1.0,
     )
 
@@ -343,7 +343,7 @@ def test_adaptive_detail_eta_varies_across_tiles():
             scoring_method="gradient_magnitude",
             denoise_min=0.05, denoise_max=0.35,
             curve=1.0, tile_size=128, overlap=0,
-            crop_to_tiles=False,
+            edge_mode="center",
             noise_type="gaussian", eta_min=0.0, eta_max=1.0,
         )
     finally:
@@ -357,4 +357,56 @@ def test_adaptive_detail_input_types_include_noise_type_and_eta():
     required = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]
     assert "noise_type" in required
     assert "eta_min" in required
-    assert "eta_max" in required
+    assert "edge_mode" in required
+    assert "crop_to_tiles" not in required
+
+
+# ---------------------------------------------------------------------------
+# Task: edge_mode (adaptive)
+# ---------------------------------------------------------------------------
+
+def _adaptive_common():
+    return dict(
+        model=_make_model_mock(), positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0, sampler_name="euler", scheduler="normal",
+        scoring_method="gradient_magnitude", denoise_min=0.05, denoise_max=0.35,
+        curve=1.5, tile_size=128, overlap=0, noise_type="gaussian",
+        eta_min=0.0, eta_max=1.0,
+    )
+
+
+def test_adaptive_edge_mode_pad_returns_original_shape_and_maps():
+    node = LLMAdaptiveTileDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    canvas, denoise_map, scoring_map = node.detail(
+        upscaled_latent={"samples": latent.clone()}, edge_mode="pad",
+        **_adaptive_common(),
+    )
+    assert canvas["samples"].shape == latent.shape
+    # maps are pixel-resolution (x8) and must match the original latent size
+    assert denoise_map.shape[1] == 40 * 8 and denoise_map.shape[2] == 44 * 8
+    assert scoring_map.shape[1] == 40 * 8 and scoring_map.shape[2] == 44 * 8
+
+
+def test_adaptive_edge_mode_crop_shrinks_canvas_and_maps():
+    node = LLMAdaptiveTileDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    canvas, denoise_map, scoring_map = node.detail(
+        upscaled_latent={"samples": latent.clone()}, edge_mode="crop",
+        **_adaptive_common(),
+    )
+    cs = canvas["samples"].shape
+    assert cs[2] < 40 and cs[3] < 44
+    assert denoise_map.shape[1] == cs[2] * 8 and denoise_map.shape[2] == cs[3] * 8
+    assert scoring_map.shape[1] == cs[2] * 8 and scoring_map.shape[2] == cs[3] * 8
+
+
+def test_adaptive_edge_mode_center_keeps_original_shape():
+    node = LLMAdaptiveTileDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    canvas, denoise_map, scoring_map = node.detail(
+        upscaled_latent={"samples": latent.clone()}, edge_mode="center",
+        **_adaptive_common(),
+    )
+    assert canvas["samples"].shape == latent.shape
+    assert denoise_map.shape[1] == 40 * 8 and denoise_map.shape[2] == 44 * 8
