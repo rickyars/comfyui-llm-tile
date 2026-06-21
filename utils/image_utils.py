@@ -227,26 +227,47 @@ def _compute_center_grid(W, H, tile_l, overlap_l):
     return cols, rows
 
 
-def pad_latent_to_grid(canvas, tile_l):
-    """Edge-replicate pad a latent canvas out to whole tile_l multiples.
+def _axis_pad(D, tile_l):
+    """Padding (before, after) for one axis so the centered grid is preserved.
 
-    Returns (padded_canvas, (pad_top, pad_left)). Padding is split
-    symmetrically on each axis. An axis already a multiple of tile_l receives
-    zero padding; if both axes are aligned the original tensor is returned
-    unchanged. The (pad_top, pad_left) offsets locate the original region
-    inside the padded canvas so callers can crop back afterward.
+    The centered grid (see _compute_center_grid / _compute_tile_coords) places
+    ``n = D // tile_l`` whole tiles with an undetailed margin of ``round(rem/2)``
+    on the near side and the rest on the far side, where ``rem = D % tile_l``.
+    To cover those margins *without moving any existing tile*, we pad each side
+    that has a margin by ``tile_l - margin`` — turning the partial edge strip
+    into one extra full tile while every original tile keeps its coordinate.
+    The result is always an exact multiple of tile_l.
+    """
+    if D <= tile_l:
+        # Smaller than one tile: centre it inside a single tile.
+        total = tile_l - D
+        return total // 2, total - total // 2
+    rem = D % tile_l
+    if rem == 0:
+        return 0, 0
+    near_margin = round(rem / 2)          # matches _compute_tile_coords start
+    far_margin = rem - near_margin
+    pad_before = (tile_l - near_margin) if near_margin > 0 else 0
+    pad_after = (tile_l - far_margin) if far_margin > 0 else 0
+    return pad_before, pad_after
+
+
+def pad_latent_to_grid(canvas, tile_l):
+    """Edge-replicate pad a latent canvas so the centered grid covers it fully.
+
+    Returns (padded_canvas, (pad_top, pad_left)). Padding preserves the
+    center-mode tile positions and appends one edge tile per uncovered margin
+    (see _axis_pad), so pad mode produces the same detail grid as center mode
+    plus edge coverage. An axis already a multiple of tile_l receives zero
+    padding; if both axes are aligned the original tensor is returned unchanged.
+    The (pad_top, pad_left) offsets locate the original region inside the padded
+    canvas so callers can crop back afterward.
     """
     _, _, H, W = canvas.shape
-    Hp = ((H + tile_l - 1) // tile_l) * tile_l
-    Wp = ((W + tile_l - 1) // tile_l) * tile_l
-    pad_h = Hp - H
-    pad_w = Wp - W
-    if pad_h == 0 and pad_w == 0:
+    pad_top, pad_bottom = _axis_pad(H, tile_l)
+    pad_left, pad_right = _axis_pad(W, tile_l)
+    if pad_top == 0 and pad_bottom == 0 and pad_left == 0 and pad_right == 0:
         return canvas, (0, 0)
-    pad_top = pad_h // 2
-    pad_bottom = pad_h - pad_top
-    pad_left = pad_w // 2
-    pad_right = pad_w - pad_left
     padded = F.pad(
         canvas, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate"
     )

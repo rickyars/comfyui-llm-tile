@@ -180,23 +180,51 @@ def test_detail_input_types_include_noise_type_and_eta():
 # Task: pad_latent_to_grid
 # ---------------------------------------------------------------------------
 
-from utils.image_utils import pad_latent_to_grid
+from utils.image_utils import (
+    pad_latent_to_grid, _compute_center_grid, _compute_tile_coords,
+)
+
+
+def _tile_anchors(coords, tile_l):
+    # The anchor (top-left of the un-grown tile) is exact regardless of overlap.
+    return sorted({(y2 - tile_l, x2 - tile_l) for (y1, x1, y2, x2) in coords})
 
 
 def test_pad_latent_to_grid_pads_to_tile_multiple():
     canvas = torch.zeros(1, 4, 100, 140)  # neither dim a multiple of 64
     padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=64)
-    assert padded.shape[2] == 128  # ceil(100/64)*64
-    assert padded.shape[3] == 192  # ceil(140/64)*64
+    # Padded dims are exact tile multiples so the grid tiles the whole canvas.
+    assert padded.shape[2] % 64 == 0
+    assert padded.shape[3] % 64 == 0
+    # H=100: 1 center tile (64), margins 18 each -> pad 46 each -> 192
+    # W=140: 2 center tiles (128), margins 6 each -> pad 58 each -> 256
+    assert padded.shape[2] == 192
+    assert padded.shape[3] == 256
 
 
-def test_pad_latent_to_grid_symmetric_split():
-    canvas = torch.zeros(1, 4, 100, 140)
-    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=64)
-    # height pad total = 28 -> top 14, bottom 14
-    assert pad_top == 14
-    # width pad total = 52 -> left 26, right 26
-    assert pad_left == 26
+def test_pad_latent_to_grid_preserves_center_grid():
+    # The core fix: pad mode must keep the center-mode tile positions and only
+    # add edge tiles, so the detail grid looks the same as center mode.
+    W0, H0, tile_l, overlap_l = 1008, 1024, 128, 8
+    canvas = torch.zeros(1, 4, H0, W0)
+
+    c, r = _compute_center_grid(W0, H0, tile_l, overlap_l)
+    center_anchors = _tile_anchors(
+        _compute_tile_coords(W0, H0, tile_l, c, r, overlap_l), tile_l)
+
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l)
+    _, _, Hp, Wp = padded.shape
+    c2, r2 = _compute_center_grid(Wp, Hp, tile_l, overlap_l)
+    padded_anchors = {
+        (ay - pad_top, ax - pad_left)
+        for (ay, ax) in _tile_anchors(
+            _compute_tile_coords(Wp, Hp, tile_l, c2, r2, overlap_l), tile_l)
+    }
+
+    # Every center-mode tile anchor is still present at the same original coords.
+    assert set(center_anchors).issubset(padded_anchors)
+    # Padded canvas is fully tileable.
+    assert Wp % tile_l == 0 and Hp % tile_l == 0
 
 
 def test_pad_latent_to_grid_replicate_fill_matches_border():
