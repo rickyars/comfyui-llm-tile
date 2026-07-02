@@ -201,24 +201,31 @@ def _t_to_rgb(t):
     return r0 + f * (r1 - r0), g0 + f * (g1 - g0), b0 + f * (b1 - b0)
 
 
-def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows):
+def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows, tile_l):
     """
     tile_coords: list of (y1, x1, y2, x2) in latent space — exact sampler positions.
     t_values:    list of pre-curve normalized score [0,1], one per tile
     canvas_h, canvas_w: latent-space dimensions (pixel dims = these x 8)
     cols, rows: strides in each axis; grid is (cols+1) x (rows+1) tiles
+    tile_l: tile edge length in latent units — used to recover the tile anchor.
     Returns: IMAGE tensor [1, canvas_h*8, canvas_w*8, 3]
 
-    Paints each tile from its x1/y1 to the next tile's x1/y1 (or canvas edge
-    for the last column/row). The heatmap maps exactly to the sampler grid.
+    Paints each tile on its non-overlapping anchor stride (``[x2 - tile_l, x2)``)
+    rather than its full sampled span (``[x1, x2)``). The sampled span extends
+    ``overlap_l`` pixels leftward/upward into the previous tile, so painting it
+    with a row-major hard overwrite lets the right/lower tile win every shared
+    overlap zone — which biases the whole map leftward and, in pad/crop modes,
+    collapses the near-edge sliver while inflating the far-edge one. Anchor
+    strides tile the canvas exactly (no overlap, no gaps), so the heatmap
+    reflects the true centered grid.
     """
     H_px, W_px = canvas_h * 8, canvas_w * 8
     img = torch.zeros(1, H_px, W_px, 3)
 
     for (y1, x1, y2, x2), t in zip(tile_coords, t_values):
-        px0 = x1 * 8
+        px0 = (x2 - tile_l) * 8
         px1 = x2 * 8
-        py0 = y1 * 8
+        py0 = (y2 - tile_l) * 8
         py1 = y2 * 8
         r, g, b = _t_to_rgb(t)
         img[0, py0:py1, px0:px1, 0] = r
@@ -470,7 +477,7 @@ class LLMAdaptiveTileDetailer:
 
         scores = _smooth_scores(scores, rows + 1, cols + 1)
         td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
-        denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows)
+        denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows, tile_l)
         if scoring_map_img is None:
             scoring_map_img = denoise_map_img
 

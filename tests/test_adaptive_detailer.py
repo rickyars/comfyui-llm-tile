@@ -130,14 +130,14 @@ def test_build_denoise_map_shape():
     # Single tile: 1×1 grid (cols=0, rows=0)
     coords = [(0, 0, 4, 4)]
     t_values = [0.5]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0)
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0, tile_l=4)
     assert result.shape == (1, 32, 32, 3)
 
 
 def test_build_denoise_map_dark_for_t_zero():
     coords = [(0, 0, 4, 4)]
     t_values = [0.0]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0)
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0, tile_l=4)
     # Check interior pixel (not border — _build_denoise_map draws white borders at tile edges)
     assert result[0, 16, 16].max().item() < 0.50  # viridis(0) is dark purple
 
@@ -145,23 +145,58 @@ def test_build_denoise_map_dark_for_t_zero():
 def test_build_denoise_map_bright_for_t_one():
     coords = [(0, 0, 4, 4)]
     t_values = [1.0]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0)
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0, tile_l=4)
     assert result[0, 0, 0, 0].item() > 0.90  # viridis(1) yellow: high R
     assert result[0, 0, 0, 1].item() > 0.80  # high G
 
 
 def test_build_denoise_map_matches_sampler_grid():
-    # 2-row, 1-column grid (cols=0, rows=1).
-    # Tile positions: r=0 at y1=0, r=1 at y1=2 (both latent).
-    # Heatmap paints the same rectangles provided to the sampler; later tiles
-    # overwrite earlier overlap pixels, matching row-major sampling order.
+    # 2-row, 1-column grid (cols=0, rows=1), tile_l=4.
+    # Tile positions: r=0 anchor block [0,4), r=1 anchor block [2,6) (latent).
+    # Heatmap paints each tile on its anchor stride [y2-tile_l, y2); later tiles
+    # still overwrite the shared band, matching row-major sampling order.
     coords = [(0, 0, 4, 4), (2, 0, 6, 4)]  # (y1, x1, y2, x2) in latent
     t_values = [0.0, 1.0]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=1)
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=1, tile_l=4)
     top_max = result[0, 8, 16].max().item()      # top-only region
     overlap_r = result[0, 24, 16, 0].item()      # second tile owns overlap
     assert top_max < 0.50    # dark purple
     assert overlap_r > 0.90
+
+
+def test_build_denoise_map_edge_tiles_symmetric_after_pad_crop():
+    # Regression: pad-mode map looked "not centered". A centered grid over an
+    # odd width leaves near/far margins that pad turns into symmetric edge
+    # tiles; the map must render them with equal width, not collapse the near
+    # sliver and inflate the far one. Overlap extends each tile leftward, so
+    # painting the full [x1, x2) span with a row-major overwrite is the bug.
+    from utils.image_utils import (
+        pad_latent_to_grid, _compute_center_grid, _compute_tile_coords)
+    import torch
+    tile_l, overlap_l = 128, 8
+    canvas = torch.zeros(1, 4, 1024, 409)
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l)
+    _, _, H, W = padded.shape
+    cols, rows = _compute_center_grid(W, H, tile_l, overlap_l)
+    coords = _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l)
+    n_cols = cols + 1
+    # give each column a distinct t so we can measure per-column ownership
+    t_values = [(idx % n_cols) / (n_cols - 1) for idx in range(len(coords))]
+    result = _build_denoise_map(coords, t_values, H, W, cols, rows, tile_l)
+    # crop back to the original region like edge_mode == "pad"
+    cropped = result[:, :, pad_left * 8:(pad_left + 409) * 8, :]
+    # measure column-run widths on an interior row (avoid white borders by
+    # sampling the row's own colour, not the border rows)
+    row = cropped[0, cropped.shape[1] // 2, :, 0]  # red channel varies with t
+    widths = []
+    start = 0
+    for x in range(1, row.shape[0] + 1):
+        if x == row.shape[0] or abs(row[x] - row[start]) > 1e-4:
+            widths.append(x - start)
+            start = x
+    # first and last runs are the edge slivers; true margins are 96 / 104 px
+    left_sliver, right_sliver = widths[0], widths[-1]
+    assert abs(left_sliver - right_sliver) <= 16, (widths,)
 
 
 from node_detailer_adaptive import LLMAdaptiveTileDetailer
