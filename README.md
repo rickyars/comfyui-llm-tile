@@ -30,11 +30,27 @@ The LLM does not hallucinate global coherence and hope for the best. It describe
 
 Two nodes:
 
-**Tiled Image Generator** (`node.py`) — standard KSampler with model, CLIP, VAE, sampler name, scheduler, steps, and CFG inputs. Uses ControlNet for outpainting coherence at tile seams.
+**Tiled Image Generator** (`node.py`) — standard KSampler with model, CLIP, VAE, sampler name, scheduler, steps, and CFG inputs. Drives seam coherence with a ControlNet or a model patch (see *Model coherence* below).
 
 **Tiled Image Generator Advanced** (`node_advanced.py`) — custom sampler, guider, noise, and sigmas inputs. Designed for Flux and other pipelines that require non-standard sampling. Same generation logic, more flexibility.
 
 Both nodes take a `json_tile_prompts` string: a JSON array where each object has a `position` (`x`, `y`) and a `prompt`. The grid processes tiles left-to-right, top-to-bottom. Each tile gets its own prompt. Each tile after the first copies the overlapping edge from its neighbor and generates into that seed region.
+
+---
+
+## Model coherence
+
+Each tile after the first is generated with its neighbor's overlapping pixels as context. How those pixels steer generation depends on the model family — wire the matching coherence input:
+
+**SDXL / Flux — `controlnet` input.** Load a tile/inpaint ControlNet and connect it to the `controlnet` input. The neighbor pixels become the control image.
+
+> **SDXL Union ControlNet** (e.g. `controlnet++_union_sdxl`) does nothing until you set its control type. Insert `ControlNetLoader → SetUnionControlNetType` (type `tile` or `repaint`) → `controlnet` input. Without this you get a checkerboard of independent tiles.
+
+**z-image (Turbo) / Qwen — `model_patch` input.** These use a DiffSynth/Fun inpaint model patch instead of a conditioning ControlNet. Load `Z-Image-Turbo-Fun-Controlnet-Union` (2.1 for inpaint) via `ModelPatchLoader` and connect it to the `model_patch` input. The node feeds the neighbor pixels in as the inpaint image plus a keep-mask of the overlap zone; the kept pixels are composited back after decode so seams stay exact.
+
+If neither input is wired the node falls back to independent per-tile generation (no seam coherence).
+
+The generator resizes empty latents to each model's channel count automatically, so 16-channel and video-format latents (Flux, Krea2/Wan21, z-image) work without extra wiring.
 
 ---
 
@@ -70,10 +86,12 @@ Position is 1-indexed. `x` is column, `y` is row. The array must contain exactly
 | `tile_width` | 1024 | Width of each tile in pixels |
 | `tile_height` | 1024 | Height of each tile in pixels |
 | `overlap_percent` | 0.15 | 15–25% recommended |
-| `controlnet_strength` | 0.7 | Higher = stronger seam coherence |
+| `control_strength` | 0.7 | Strength of the coherence signal (ControlNet or model patch). Higher = stronger seam coherence |
 | `seed` | 0 | Base seed; each tile increments by 1 |
 | `seamlessX` | true | Wraps last column into first for seamless horizontal repeat |
 | `seamlessY` | false | Wraps last row into first for seamless vertical repeat |
+| `controlnet` | — | Optional. SDXL/Flux coherence ControlNet (see *Model coherence*) |
+| `model_patch` | — | Optional. z-image/Qwen DiffSynth inpaint model patch (see *Model coherence*) |
 
 ### Standard node only
 
@@ -144,6 +162,8 @@ Format:
 ## Tiled detailers
 
 Two nodes for refining upscaled images tile by tile. Wire an upscaled latent into either node in place of a KSampler.
+
+Both detailers handle 16-channel and video-format latents, so SDXL, Flux, z-image, and Krea2/Wan21 all work. Single-frame video latents (Krea2) are supported; the node squeezes and restores the temporal axis around sampling.
 
 ---
 
