@@ -132,7 +132,7 @@ def test_detail_uses_sample_custom_not_sample():
         seed=0, steps=20, cfg=7.0,
         sampler_name="euler", scheduler="normal",
         denoise=0.25, tile_size=256, overlap=0,
-        crop_to_tiles=False,
+        edge_mode="center",
         noise_type="gaussian", eta=0.0,
     )
 
@@ -158,7 +158,7 @@ def test_detail_eta_nonzero_passes_eta_to_ksampler():
             seed=0, steps=20, cfg=7.0,
             sampler_name="euler_ancestral", scheduler="normal",
             denoise=0.25, tile_size=256, overlap=0,
-            crop_to_tiles=False,
+            edge_mode="center",
             noise_type="gaussian", eta=0.8,
         )
     finally:
@@ -172,3 +172,192 @@ def test_detail_input_types_include_noise_type_and_eta():
     required = LLMTileSequentialDetailer.INPUT_TYPES()["required"]
     assert "noise_type" in required
     assert "eta" in required
+    assert "edge_mode" in required
+    assert "crop_to_tiles" not in required
+
+
+# ---------------------------------------------------------------------------
+# Task: pad_latent_to_grid
+# ---------------------------------------------------------------------------
+
+from utils.image_utils import (
+    pad_latent_to_grid, _compute_center_grid, _compute_tile_coords,
+)
+
+
+def _tile_anchors(coords, tile_l):
+    # The anchor (top-left of the un-grown tile) is exact regardless of overlap.
+    return sorted({(y2 - tile_l, x2 - tile_l) for (y1, x1, y2, x2) in coords})
+
+
+def test_pad_latent_to_grid_pads_to_tile_multiple():
+    canvas = torch.zeros(1, 4, 100, 140)  # neither dim a multiple of 64
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=64)
+    # Padded dims are exact tile multiples so the grid tiles the whole canvas.
+    assert padded.shape[2] % 64 == 0
+    assert padded.shape[3] % 64 == 0
+    # H=100: 1 center tile (64), margins 18 each -> pad 46 each -> 192
+    # W=140: 2 center tiles (128), margins 6 each -> pad 58 each -> 256
+    assert padded.shape[2] == 192
+    assert padded.shape[3] == 256
+
+
+def test_pad_latent_to_grid_preserves_center_grid():
+    # The core fix: pad mode must keep the center-mode tile positions and only
+    # add edge tiles, so the detail grid looks the same as center mode.
+    W0, H0, tile_l, overlap_l = 1008, 1024, 128, 8
+    canvas = torch.zeros(1, 4, H0, W0)
+
+    c, r = _compute_center_grid(W0, H0, tile_l, overlap_l)
+    center_anchors = _tile_anchors(
+        _compute_tile_coords(W0, H0, tile_l, c, r, overlap_l), tile_l)
+
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l)
+    _, _, Hp, Wp = padded.shape
+    c2, r2 = _compute_center_grid(Wp, Hp, tile_l, overlap_l)
+    padded_anchors = {
+        (ay - pad_top, ax - pad_left)
+        for (ay, ax) in _tile_anchors(
+            _compute_tile_coords(Wp, Hp, tile_l, c2, r2, overlap_l), tile_l)
+    }
+
+    # Every center-mode tile anchor is still present at the same original coords.
+    assert set(center_anchors).issubset(padded_anchors)
+    # Padded canvas is fully tileable.
+    assert Wp % tile_l == 0 and Hp % tile_l == 0
+
+
+def test_pad_latent_to_grid_replicate_fill_matches_border():
+    canvas = torch.arange(16, dtype=torch.float32).reshape(1, 1, 4, 4)
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=8)
+    # padded interior region equals original
+    inner = padded[:, :, pad_top:pad_top + 4, pad_left:pad_left + 4]
+    assert torch.equal(inner, canvas)
+    # the column just left of the content equals the content's left border (replicate)
+    left_border = canvas[:, :, :, 0]
+    pad_col = padded[:, :, pad_top:pad_top + 4, pad_left - 1]
+    assert torch.equal(pad_col, left_border)
+
+
+def test_pad_latent_to_grid_zero_pad_when_aligned():
+    canvas = torch.zeros(1, 4, 128, 256)  # both multiples of 128
+    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l=128)
+    assert padded.shape == canvas.shape
+    assert (pad_top, pad_left) == (0, 0)
+    assert padded is canvas  # no-op returns the same tensor
+
+
+# ---------------------------------------------------------------------------
+# Task: edge_mode (sequential)
+# ---------------------------------------------------------------------------
+
+def test_edge_mode_pad_returns_original_shape():
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    # 40x44 latent, tile_l=16 (tile_size=128) -> not tile-aligned
+    latent = torch.randn(1, 4, 40, 44)
+    out = node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": latent.clone()},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0,
+        edge_mode="pad",
+        noise_type="gaussian", eta=0.0,
+    )
+    assert out[0]["samples"].shape == latent.shape
+
+
+def test_edge_mode_pad_details_former_margins():
+    # sample_custom (stubbed) returns latent.clone(), so diffused regions are
+    # unchanged vs input. To prove the margin tiles RAN, count sample_custom
+    # calls: pad mode must invoke more tiles than center mode for the same input.
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    common = dict(
+        model=_make_model_mock(), positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0, sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0, noise_type="gaussian", eta=0.0,
+    )
+
+    comfy.sample.sample_custom.reset_mock()
+    node.detail(upscaled_latent={"samples": latent.clone()}, edge_mode="center", **common)
+    center_calls = comfy.sample.sample_custom.call_count
+
+    comfy.sample.sample_custom.reset_mock()
+    node.detail(upscaled_latent={"samples": latent.clone()}, edge_mode="pad", **common)
+    pad_calls = comfy.sample.sample_custom.call_count
+
+    assert pad_calls > center_calls
+
+
+def test_edge_mode_crop_shrinks_output():
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    out = node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": latent.clone()},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0,
+        edge_mode="crop",
+        noise_type="gaussian", eta=0.0,
+    )
+    s = out[0]["samples"].shape
+    # 40x44 latent, tile_l=16 -> centered 2x2 grid crops to exactly 32x32
+    assert s[2] == 32 and s[3] == 32
+
+
+def test_edge_mode_center_keeps_original_shape():
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+    out = node.detail(
+        model=_make_model_mock(),
+        upscaled_latent={"samples": latent.clone()},
+        positive=[], negative=[],
+        seed=0, steps=20, cfg=7.0,
+        sampler_name="euler", scheduler="normal",
+        denoise=0.25, tile_size=128, overlap=0,
+        edge_mode="center",
+        noise_type="gaussian", eta=0.0,
+    )
+    assert out[0]["samples"].shape == latent.shape
+
+
+def test_edge_mode_pad_blends_diffused_content_into_margins():
+    # Round-trip check: prove pad mode actually writes diffused tile content
+    # into the (cropped-back) output, not just that it returns the right shape.
+    # Override the stub so each tile comes back clearly modified (+100), then
+    # confirm the original-size output differs from the input everywhere.
+    from node_detailer import LLMTileSequentialDetailer
+    node = LLMTileSequentialDetailer()
+    latent = torch.randn(1, 4, 40, 44)
+
+    original = comfy.sample.sample_custom
+    comfy.sample.sample_custom = MagicMock(
+        side_effect=lambda model, noise, cfg, sampler, sigmas, pos, neg, lat, **kw: lat + 100.0
+    )
+    try:
+        out = node.detail(
+            model=_make_model_mock(),
+            upscaled_latent={"samples": latent.clone()},
+            positive=[], negative=[],
+            seed=0, steps=20, cfg=7.0,
+            sampler_name="euler", scheduler="normal",
+            denoise=0.25, tile_size=128, overlap=0,
+            edge_mode="pad",
+            noise_type="gaussian", eta=0.0,
+        )
+    finally:
+        comfy.sample.sample_custom = original
+
+    result = out[0]["samples"]
+    assert result.shape == latent.shape
+    # Every pixel of the original region is covered by a diffused tile, so the
+    # whole output should be shifted by +100 vs the input (no undetailed margin).
+    assert torch.all(result > latent + 50.0)

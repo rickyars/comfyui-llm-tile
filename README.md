@@ -30,11 +30,27 @@ The LLM does not hallucinate global coherence and hope for the best. It describe
 
 Two nodes:
 
-**Tiled Image Generator** (`node.py`) — standard KSampler with model, CLIP, VAE, sampler name, scheduler, steps, and CFG inputs. Uses ControlNet for outpainting coherence at tile seams.
+**Tiled Image Generator** (`node.py`) — standard KSampler with model, CLIP, VAE, sampler name, scheduler, steps, and CFG inputs. Drives seam coherence with a ControlNet or a model patch (see *Model coherence* below).
 
 **Tiled Image Generator Advanced** (`node_advanced.py`) — custom sampler, guider, noise, and sigmas inputs. Designed for Flux and other pipelines that require non-standard sampling. Same generation logic, more flexibility.
 
 Both nodes take a `json_tile_prompts` string: a JSON array where each object has a `position` (`x`, `y`) and a `prompt`. The grid processes tiles left-to-right, top-to-bottom. Each tile gets its own prompt. Each tile after the first copies the overlapping edge from its neighbor and generates into that seed region.
+
+---
+
+## Model coherence
+
+Each tile after the first is generated with its neighbor's overlapping pixels as context. How those pixels steer generation depends on the model family — wire the matching coherence input:
+
+**SDXL / Flux — `controlnet` input.** Load a tile/inpaint ControlNet and connect it to the `controlnet` input. The neighbor pixels become the control image.
+
+> **SDXL Union ControlNet** (e.g. `controlnet++_union_sdxl`) does nothing until you set its control type. Insert `ControlNetLoader → SetUnionControlNetType` (type `tile` or `repaint`) → `controlnet` input. Without this you get a checkerboard of independent tiles.
+
+**z-image (Turbo) / Qwen — `model_patch` input.** These use a DiffSynth/Fun inpaint model patch instead of a conditioning ControlNet. Load `Z-Image-Turbo-Fun-Controlnet-Union` (2.1 for inpaint) via `ModelPatchLoader` and connect it to the `model_patch` input. The node feeds the neighbor pixels in as the inpaint image plus a keep-mask of the overlap zone; the kept pixels are composited back after decode so seams stay exact.
+
+If neither input is wired the node falls back to independent per-tile generation (no seam coherence).
+
+The generator resizes empty latents to each model's channel count automatically, so 16-channel and video-format latents (Flux, Krea2/Wan21, z-image) work without extra wiring.
 
 ---
 
@@ -70,10 +86,12 @@ Position is 1-indexed. `x` is column, `y` is row. The array must contain exactly
 | `tile_width` | 1024 | Width of each tile in pixels |
 | `tile_height` | 1024 | Height of each tile in pixels |
 | `overlap_percent` | 0.15 | 15–25% recommended |
-| `controlnet_strength` | 0.7 | Higher = stronger seam coherence |
+| `control_strength` | 0.7 | Strength of the coherence signal (ControlNet or model patch). Higher = stronger seam coherence |
 | `seed` | 0 | Base seed; each tile increments by 1 |
 | `seamlessX` | true | Wraps last column into first for seamless horizontal repeat |
 | `seamlessY` | false | Wraps last row into first for seamless vertical repeat |
+| `controlnet` | — | Optional. SDXL/Flux coherence ControlNet (see *Model coherence*) |
+| `model_patch` | — | Optional. z-image/Qwen DiffSynth inpaint model patch (see *Model coherence*) |
 
 ### Standard node only
 
@@ -145,6 +163,8 @@ Format:
 
 Two nodes for refining upscaled images tile by tile. Wire an upscaled latent into either node in place of a KSampler.
 
+Both detailers handle 16-channel and video-format latents, so SDXL, Flux, z-image, and Krea2/Wan21 all work. Single-frame video latents (Krea2) are supported; the node squeezes and restores the temporal axis around sampling.
+
 ---
 
 ### Tiled Image Detailer
@@ -156,11 +176,11 @@ Applies a single denoise value to every tile. Good starting point; use when the 
 | `denoise` | 0.25 | Applied uniformly to every tile |
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones using a smoothstep curve to hide seams. |
-| `crop_to_tiles` | false | Crop the output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and the outer strips are left untouched. Enable this to remove those strips from the output. |
+| `edge_mode` | `center` | How the grid edges are handled when the image size is not a multiple of `tile_size`. `center`: diffuse the centered grid and leave the outer strips as the original upscale (output keeps original size). `crop`: crop the output down to the detailed region. `pad`: keep the same tile grid as `center` and add one edge tile per uncovered strip — the latent is edge-replicated outward so those edge tiles have data, everything is diffused, then the output is cropped back to original size. Adds up to one extra tile per padded axis. |
 | `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is the standard ComfyUI default. Other types (brownian, uniform, etc.) require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). |
 | `eta` | 1.0 | SDE noise injection per step. 0 = deterministic (ODE path). 1 = standard ancestral. Only applies to ancestral/SDE samplers: `euler_ancestral`, `dpmpp_sde`, `dpmpp_2s_ancestral`, `dpmpp_2m_sde`, `dpmpp_3m_sde`, `rk_beta`. ODE samplers (`euler`, `dpm++_2m`, etc.) ignore this. Values above 1.0 inject more noise than the SDE derivation calls for — adds texture but risks incoherence at low denoise. |
 
-The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, small outside strips are left untouched rather than creating partial edge tiles.
+The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, the outside strips are not covered by the centered grid; use `edge_mode` to control them — `center` leaves them untouched, `crop` removes them, and `pad` keeps the same grid and adds an edge tile per strip (edge-replicating the latent so they have data) so they get detailed too, then crops back to the original size.
 
 ---
 
@@ -198,7 +218,7 @@ After scoring, each tile's raw score is blended with the average of its 4-connec
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended using a smoothstep curve to hide seams. |
-| `crop_to_tiles` | false | Crop output to the tile-covered region. When the image size is not a multiple of `tile_size`, the grid is centered and outer strips are left untouched. Enable this to remove those strips from the output latent and debug images. |
+| `edge_mode` | `center` | How the grid edges are handled when the image size is not a multiple of `tile_size`. `center`: diffuse the centered grid and leave the outer strips as the original upscale. `crop`: crop the output latent and debug images down to the detailed region. `pad`: keep the same tile grid as `center` and add one edge tile per uncovered strip (the latent is edge-replicated outward so they have data), diffuse everything, then crop back to original size (debug maps are cropped to match). Adds up to one extra tile per padded axis. |
 | `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is standard. Other types require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). `brownian` is a good first alternative for portraits and fabric. |
 | `eta_min` | 0.0 | Eta applied to the lowest-denoise tiles. 0 = deterministic ODE for those tiles. Only applies to ancestral/SDE samplers (see Tiled Image Detailer note above). |
 | `eta_max` | 1.0 | Eta applied to the highest-denoise tiles. Scales linearly from `eta_min` at `denoise_min` to `eta_max` at `denoise_max`. Values above 1.0 amplify noise beyond the SDE derivation — useful for texture but risky above 1.3. |
