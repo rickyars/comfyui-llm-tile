@@ -34,6 +34,12 @@ def _make_comfy_stubs():
         side_effect=lambda latent, seed, inds: torch.zeros_like(latent)
     )
 
+    # fix_empty_latent_channels — real ComfyUI reshapes empty latents to the
+    # model's channel count / rank; for tests a pass-through is enough
+    comfy.sample.fix_empty_latent_channels = unittest.mock.MagicMock(
+        side_effect=lambda model, latent: latent
+    )
+
     # sample_custom — returns a clone of latent_image (arg index 7)
     comfy.sample.sample_custom = unittest.mock.MagicMock(
         side_effect=lambda model, noise, cfg, sampler, sigmas, pos, neg, latent, **kw: latent.clone()

@@ -4,7 +4,7 @@ import comfy.model_management
 from comfy.utils import ProgressBar
 
 from .utils import parse_tile_prompts
-from .utils import apply_controlnet_to_conditioning, blend_and_place_tile
+from .utils import apply_controlnet_to_conditioning, blend_and_place_tile, build_working_tensor
 from .node import _apply_zimage_patch, _decode_tile
 
 
@@ -106,6 +106,7 @@ class TiledImageGeneratorAdvanced:
                     print(f"Tile ({x+1},{y+1}) gen canvas: {gen_w8}x{gen_h8}, canvas pos: ({final_pos_x},{final_pos_y})")
                     print(f"Generating tile ({x+1},{y+1}) prompt: {current_prompt}")
 
+                    # Per-tile encoding: a shared neg_cond corrupts SDXL pooled_output across tiles.
                     pos_cond = clip.encode_from_tokens_scheduled(clip.tokenize(current_prompt))
                     neg_cond = clip.encode_from_tokens_scheduled(clip.tokenize(""))
 
@@ -115,78 +116,12 @@ class TiledImageGeneratorAdvanced:
                     guider.model_patcher = orig_patcher
 
                     if coherence_active:
-                        working_tensor = torch.zeros((1, gen_h8, gen_w8, 3), dtype=torch.float32)
-                        keep_mask = torch.zeros((gen_h8, gen_w8), dtype=torch.float32)
-
-                        if has_left_neighbor:
-                            source_x = final_pos_x - overlap_x
-                            source_start_y = final_pos_y
-                            source_end_y = min(final_pos_y + tile_height, final_height)
-                            source_height = source_end_y - source_start_y
-                            target_start_y = overlap_y if has_top_neighbor else 0
-                            copy_height = min(source_height, gen_h8 - target_start_y)
-                            if copy_height > 0:
-                                working_tensor[0,
-                                    target_start_y:target_start_y + copy_height, :overlap_x, :
-                                ] = final_tensor[0,
-                                    source_start_y:source_start_y + copy_height,
-                                    source_x:source_x + overlap_x, :]
-                                keep_mask[target_start_y:target_start_y + copy_height, :overlap_x] = 1.0
-
-                        if seamlessX and x == grid_width - 1 and overlap_x > 0:
-                            wrap_target_x = overlap_x + tile_width
-                            source_start_y = final_pos_y
-                            source_end_y = min(final_pos_y + tile_height, final_height)
-                            source_height = source_end_y - source_start_y
-                            target_start_y = overlap_y if has_top_neighbor else 0
-                            copy_height = min(source_height, gen_h8 - target_start_y)
-                            if copy_height > 0 and wrap_target_x + overlap_x <= gen_w8:
-                                working_tensor[0,
-                                    target_start_y:target_start_y + copy_height,
-                                    wrap_target_x:wrap_target_x + overlap_x, :
-                                ] = final_tensor[0,
-                                    source_start_y:source_start_y + copy_height, 0:overlap_x, :]
-                                keep_mask[target_start_y:target_start_y + copy_height,
-                                          wrap_target_x:wrap_target_x + overlap_x] = 1.0
-
-                        if seamlessY and y == grid_height - 1 and overlap_y > 0:
-                            wrap_target_y = overlap_y + tile_height
-                            source_start_x = final_pos_x
-                            source_end_x = min(final_pos_x + tile_width, final_width)
-                            source_width = source_end_x - source_start_x
-                            target_start_x = overlap_x if has_left_neighbor else 0
-                            copy_width = min(source_width, gen_w8 - target_start_x)
-                            if copy_width > 0 and wrap_target_y + overlap_y <= gen_h8:
-                                working_tensor[0,
-                                    wrap_target_y:wrap_target_y + overlap_y,
-                                    target_start_x:target_start_x + copy_width, :
-                                ] = final_tensor[0,
-                                    0:overlap_y, source_start_x:source_start_x + copy_width, :]
-                                keep_mask[wrap_target_y:wrap_target_y + overlap_y,
-                                          target_start_x:target_start_x + copy_width] = 1.0
-
-                        if has_top_neighbor:
-                            source_y = final_pos_y - overlap_y
-                            source_start_x = final_pos_x
-                            source_end_x = min(final_pos_x + tile_width, final_width)
-                            source_width = source_end_x - source_start_x
-                            target_start_x = overlap_x if has_left_neighbor else 0
-                            copy_width = min(source_width, gen_w8 - target_start_x)
-                            if copy_width > 0:
-                                working_tensor[0,
-                                    :overlap_y, target_start_x:target_start_x + copy_width, :
-                                ] = final_tensor[0,
-                                    source_y:source_y + overlap_y,
-                                    source_start_x:source_start_x + copy_width, :]
-                                keep_mask[:overlap_y, target_start_x:target_start_x + copy_width] = 1.0
-
-                        if has_left_neighbor and has_top_neighbor:
-                            corner_source_x = final_pos_x - overlap_x
-                            corner_source_y = final_pos_y - overlap_y
-                            working_tensor[0, :overlap_y, :overlap_x, :] = final_tensor[0,
-                                corner_source_y:corner_source_y + overlap_y,
-                                corner_source_x:corner_source_x + overlap_x, :]
-                            keep_mask[:overlap_y, :overlap_x] = 1.0
+                        working_tensor, keep_mask = build_working_tensor(
+                            final_tensor, final_pos_x, final_pos_y,
+                            tile_width, tile_height, overlap_x, overlap_y,
+                            gen_w8, gen_h8, has_left_neighbor, has_top_neighbor,
+                            wrap_x=(seamlessX and x == grid_width - 1),
+                            wrap_y=(seamlessY and y == grid_height - 1))
 
                         if model_patch is not None:
                             guider.model_patcher = _apply_zimage_patch(
@@ -222,10 +157,15 @@ class TiledImageGeneratorAdvanced:
                         tile_width, tile_height, overlap_x, overlap_y,
                         has_left_neighbor, has_top_neighbor, coherence_active)
 
-                    comfy.model_management.soft_empty_cache()
+                    # Flushing the CUDA cache every tile costs real time and mostly frees
+                    # memory the next tile immediately re-allocates; throttle it.
+                    if (idx + 1) % 4 == 0:
+                        comfy.model_management.soft_empty_cache()
                     pbar.update(1)
         finally:
             guider.model_patcher = orig_patcher
+
+        comfy.model_management.soft_empty_cache()
 
         tile_batch = torch.cat(individual_tiles, dim=0) if individual_tiles else \
             torch.zeros((1, tile_height, tile_width, 3), dtype=torch.float32)

@@ -1,13 +1,5 @@
-import numpy as np
 import torch
 import torch.nn.functional as F
-
-
-def resize_mask_to_latent(outpaint_mask, latent_h, latent_w, device=None):
-    """Resize outpaint_mask [1, H, W, 1] to latent space [1, latent_H, latent_W]."""
-    mask = outpaint_mask[:, :, :, 0]
-    result = F.interpolate(mask.unsqueeze(1), size=(latent_h, latent_w), mode='nearest').squeeze(1)
-    return result.to(device) if device is not None else result
 
 
 def blend_and_place_tile(canvas, generated_tile, pos_x, pos_y,
@@ -58,102 +50,99 @@ def blend_and_place_tile(canvas, generated_tile, pos_x, pos_y,
     canvas[0, pos_y:pos_y + tile_height, pos_x:pos_x + tile_width, :] = extracted
 
 
-def gaussian_blend_tiles(tiles, positions, tile_width, tile_height, overlap_x, overlap_y, final_width, final_height,
-                         sigma=0.4):
+def build_working_tensor(final_tensor, final_pos_x, final_pos_y,
+                         tile_width, tile_height, overlap_x, overlap_y,
+                         gen_w8, gen_h8, has_left_neighbor, has_top_neighbor,
+                         wrap_x=False, wrap_y=False):
     """
-    Blend tiles using Gaussian weights after all tiles have been generated.
+    Build the expanded generation canvas for one tile from already-placed neighbours.
 
-    Args:
-        tiles: List of image tensors in any shape
-        positions: List of (x, y) positions for each tile
-        tile_width/height: Dimensions of each tile
-        overlap_x/y: Overlap amounts in pixels
-        final_width/height: Final image dimensions
-        sigma: Controls the spread of the Gaussian (smaller = sharper transition)
+    Copies the left/top neighbour overlap strips (and the corner), plus the
+    seamless wrap strips when the tile is on the far edge, into a fresh
+    working tensor, and marks the copied pixels in keep_mask.
 
-    Returns:
-        Blended image tensor [1, H, W, C]
+    final_tensor: [1, final_H, final_W, 3] canvas being assembled
+    gen_w8/gen_h8: 8-aligned generation canvas size for this tile
+    wrap_x/wrap_y: True when this tile borders the seamless wrap edge
+
+    Returns (working_tensor [1, gen_h8, gen_w8, 3], keep_mask [gen_h8, gen_w8])
+    where keep_mask is 1 wherever neighbour pixels were copied in.
     """
-    # Determine device from the first tile
-    device = tiles[0].device if len(tiles) > 0 else torch.device('cpu')
+    _, final_height, final_width, _ = final_tensor.shape
+    working_tensor = torch.zeros((1, gen_h8, gen_w8, 3), dtype=torch.float32)
+    keep_mask = torch.zeros((gen_h8, gen_w8), dtype=torch.float32)
 
-    # Create empty canvas and weight accumulator
-    final_tensor = torch.zeros((1, final_height, final_width, 3), dtype=torch.float32, device=device)
-    weight_accumulator = torch.zeros((1, final_height, final_width, 1), dtype=torch.float32, device=device)
+    if has_left_neighbor:
+        source_x = final_pos_x - overlap_x
+        source_start_y = final_pos_y
+        source_end_y = min(final_pos_y + tile_height, final_height)
+        source_height = source_end_y - source_start_y
+        target_start_y = overlap_y if has_top_neighbor else 0
+        copy_height = min(source_height, gen_h8 - target_start_y)
+        if copy_height > 0:
+            working_tensor[0,
+                target_start_y:target_start_y + copy_height, :overlap_x, :
+            ] = final_tensor[0,
+                source_start_y:source_start_y + copy_height,
+                source_x:source_x + overlap_x, :]
+            keep_mask[target_start_y:target_start_y + copy_height, :overlap_x] = 1.0
 
-    # Process each tile
-    for i, (original_tile, (pos_x, pos_y)) in enumerate(zip(tiles, positions)):
-        # Print debug info
-        #print(f"Processing tile {i}, shape: {original_tile.shape}, position: ({pos_x}, {pos_y})")
+    if wrap_x and overlap_x > 0:
+        wrap_target_x = overlap_x + tile_width
+        source_start_y = final_pos_y
+        source_end_y = min(final_pos_y + tile_height, final_height)
+        source_height = source_end_y - source_start_y
+        target_start_y = overlap_y if has_top_neighbor else 0
+        copy_height = min(source_height, gen_h8 - target_start_y)
+        if copy_height > 0 and wrap_target_x + overlap_x <= gen_w8:
+            working_tensor[0,
+                target_start_y:target_start_y + copy_height,
+                wrap_target_x:wrap_target_x + overlap_x, :
+            ] = final_tensor[0,
+                source_start_y:source_start_y + copy_height, 0:overlap_x, :]
+            keep_mask[target_start_y:target_start_y + copy_height,
+                      wrap_target_x:wrap_target_x + overlap_x] = 1.0
 
-        # Calculate valid region (handle edge cases)
-        h = min(tile_height, final_height - pos_y)
-        w = min(tile_width, final_width - pos_x)
+    if wrap_y and overlap_y > 0:
+        wrap_target_y = overlap_y + tile_height
+        source_start_x = final_pos_x
+        source_end_x = min(final_pos_x + tile_width, final_width)
+        source_width = source_end_x - source_start_x
+        target_start_x = overlap_x if has_left_neighbor else 0
+        copy_width = min(source_width, gen_w8 - target_start_x)
+        if copy_width > 0 and wrap_target_y + overlap_y <= gen_h8:
+            working_tensor[0,
+                wrap_target_y:wrap_target_y + overlap_y,
+                target_start_x:target_start_x + copy_width, :
+            ] = final_tensor[0,
+                0:overlap_y, source_start_x:source_start_x + copy_width, :]
+            keep_mask[wrap_target_y:wrap_target_y + overlap_y,
+                      target_start_x:target_start_x + copy_width] = 1.0
 
-        # Create weight map for this tile
-        weights = np.ones((h, w), dtype=np.float32)
+    if has_top_neighbor:
+        source_y = final_pos_y - overlap_y
+        source_start_x = final_pos_x
+        source_end_x = min(final_pos_x + tile_width, final_width)
+        source_width = source_end_x - source_start_x
+        target_start_x = overlap_x if has_left_neighbor else 0
+        copy_width = min(source_width, gen_w8 - target_start_x)
+        if copy_width > 0:
+            working_tensor[0,
+                :overlap_y, target_start_x:target_start_x + copy_width, :
+            ] = final_tensor[0,
+                source_y:source_y + overlap_y,
+                source_start_x:source_start_x + copy_width, :]
+            keep_mask[:overlap_y, target_start_x:target_start_x + copy_width] = 1.0
 
-        # Apply Gaussian falloff in overlap regions
-        # Left edge (if not leftmost tile)
-        if pos_x > 0 and overlap_x > 0:
-            for x in range(min(overlap_x, w)):
-                # Distance from edge (0 at edge, 1 at overlap boundary)
-                dist = x / overlap_x
-                weights[:, x] *= np.exp(-((1 - dist) ** 2) / (2 * sigma ** 2))
+    if has_left_neighbor and has_top_neighbor:
+        corner_source_x = final_pos_x - overlap_x
+        corner_source_y = final_pos_y - overlap_y
+        working_tensor[0, :overlap_y, :overlap_x, :] = final_tensor[0,
+            corner_source_y:corner_source_y + overlap_y,
+            corner_source_x:corner_source_x + overlap_x, :]
+        keep_mask[:overlap_y, :overlap_x] = 1.0
 
-        # Right edge (if not rightmost tile)
-        if pos_x + w < final_width and overlap_x > 0:
-            for x in range(max(0, w - overlap_x), w):
-                dist = (w - 1 - x) / overlap_x
-                weights[:, x] *= np.exp(-((1 - dist) ** 2) / (2 * sigma ** 2))
-
-        # Top edge (if not topmost tile)
-        if pos_y > 0 and overlap_y > 0:
-            for y in range(min(overlap_y, h)):
-                dist = y / overlap_y
-                weights[y, :] *= np.exp(-((1 - dist) ** 2) / (2 * sigma ** 2))
-
-        # Bottom edge (if not bottommost tile)
-        if pos_y + h < final_height and overlap_y > 0:
-            for y in range(max(0, h - overlap_y), h):
-                dist = (h - 1 - y) / overlap_y
-                weights[y, :] *= np.exp(-((1 - dist) ** 2) / (2 * sigma ** 2))
-
-        # Convert weights to tensor with same shape as tile region
-        weights_tensor = torch.from_numpy(weights).to(device).reshape(h, w, 1)
-
-        try:
-            # Handle different tensor shapes
-            if len(original_tile.shape) == 4:  # [B, H, W, C]
-                # Extract the first element from batch
-                tile_section = original_tile[0, :h, :w, :]
-            elif len(original_tile.shape) == 3:  # [H, W, C]
-                # No batch dimension
-                tile_section = original_tile[:h, :w, :]
-            else:
-                print(f"Unexpected tensor shape: {original_tile.shape}")
-                continue
-
-            # Apply weighted accumulation directly with matched shapes
-            weighted_tile = tile_section * weights_tensor
-
-            # Add to the final tensor
-            final_tensor[0, pos_y:pos_y + h, pos_x:pos_x + w, :] += weighted_tile
-            weight_accumulator[0, pos_y:pos_y + h, pos_x:pos_x + w, :] += weights_tensor
-
-        except Exception as e:
-            print(f"Error processing tile {i}: {e}")
-            print(f"Tile shape: {original_tile.shape}")
-            print(f"Weights shape: {weights_tensor.shape}")
-            print(f"Position: ({pos_x}, {pos_y}), size: ({w}, {h})")
-            raise
-
-    # Normalize by accumulated weights (with small epsilon to avoid division by zero)
-    epsilon = 1e-8
-    mask = weight_accumulator > epsilon
-    final_tensor = torch.where(mask, final_tensor / weight_accumulator, final_tensor)
-
-    return final_tensor
+    return working_tensor, keep_mask
 
 
 def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):

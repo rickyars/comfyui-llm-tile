@@ -261,7 +261,9 @@ def _build_canvas_quadtree(canvas, min_cell=4, max_iterations=None):
 
     Returns: list of (ry, rx, rh, rw) leaf cells covering the full canvas.
     """
-    sample = canvas[0]  # [C, H, W]
+    # The greedy loop calls _region_detail (.std().item()) hundreds of times;
+    # on a GPU tensor each .item() is a device sync, so score on CPU instead.
+    sample = canvas[0].detach().cpu()  # [C, H, W]
     _, H, W = sample.shape
 
     if max_iterations is None:
@@ -534,8 +536,13 @@ class LLMAdaptiveTileDetailer:
                 has_top=(r > 0 and y1 < tile_coords[tile_idx - n_cols][2]),
             )
 
-            comfy.model_management.soft_empty_cache()
+            # Flushing the CUDA cache every tile costs real time and mostly frees
+            # memory the next tile immediately re-allocates; throttle it.
+            if (tile_idx + 1) % 4 == 0:
+                comfy.model_management.soft_empty_cache()
             pbar.update(1)
+
+        comfy.model_management.soft_empty_cache()
 
         if edge_mode == "crop":
             y1_c, x1_c = tile_coords[0][0], tile_coords[0][1]

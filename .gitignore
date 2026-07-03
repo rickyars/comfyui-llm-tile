@@ -46,3 +46,8 @@ Thumbs.db
 
 # Claude
 .superpowers
+.claude/
+
+# pytest
+.pytest_cache/
+pytest-cache-files-*/

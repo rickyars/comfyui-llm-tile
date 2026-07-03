@@ -57,6 +57,16 @@ class LLMTileSequentialDetailer:
                tile_size, overlap, edge_mode, noise_type, eta):
 
         canvas = upscaled_latent["samples"].clone()
+        # Video-latent-format models (e.g. Krea2 with the Wan VAE) hand us a 5D
+        # (B, C, T, H, W) latent; everything below operates in 4D image space, so
+        # collapse a singleton temporal axis here and restore it before returning.
+        temporal_latent = canvas.ndim == 5
+        if temporal_latent:
+            if canvas.shape[2] != 1:
+                raise ValueError(
+                    "LLMTileSequentialDetailer only supports single-frame latents, "
+                    f"got temporal dim T={canvas.shape[2]}.")
+            canvas = canvas[:, :, 0]
         _, _, H0, W0 = canvas.shape
 
         tile_l = tile_size // 8
@@ -105,11 +115,17 @@ class LLMTileSequentialDetailer:
             tile_seed = seed + tile_idx
             tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
 
-            noise = prepare_noise_typed(tile_latent, tile_seed, noise_type, sigma_min, sigma_max)
+            # Match the model's expected latent rank before sampling (video-latent
+            # models expect 5D); no-op for ordinary 4D image models. See the
+            # adaptive detailer for the full rationale.
+            model_tile_latent = comfy.sample.fix_empty_latent_channels(model, tile_latent)
+            noise = prepare_noise_typed(model_tile_latent, tile_seed, noise_type, sigma_min, sigma_max)
             refined = comfy.sample.sample_custom(
                 model, noise, cfg, sampler, tile_sigmas,
-                positive, negative, tile_latent,
+                positive, negative, model_tile_latent,
             )
+            if refined.ndim == 5:
+                refined = refined.squeeze(2)
 
             feather_blend_latent(
                 canvas, refined, y1, x1, overlap_l,
@@ -117,8 +133,13 @@ class LLMTileSequentialDetailer:
                 has_top=(r > 0 and y1 < tile_coords[tile_idx - n_cols][2]),
             )
 
-            comfy.model_management.soft_empty_cache()
+            # Flushing the CUDA cache every tile costs real time and mostly frees
+            # memory the next tile immediately re-allocates; throttle it.
+            if (tile_idx + 1) % 4 == 0:
+                comfy.model_management.soft_empty_cache()
             pbar.update(1)
+
+        comfy.model_management.soft_empty_cache()
 
         if edge_mode == "crop":
             y1_c, x1_c = tile_coords[0][0], tile_coords[0][1]
@@ -127,6 +148,8 @@ class LLMTileSequentialDetailer:
         elif edge_mode == "pad":
             canvas = canvas[:, :, pad_top:pad_top + H0, pad_left:pad_left + W0]
 
+        if temporal_latent:
+            canvas = canvas.unsqueeze(2)
         return ({"samples": canvas},)
 
 
