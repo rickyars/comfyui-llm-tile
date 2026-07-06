@@ -203,6 +203,58 @@ def test_return_names_uses_scoring_map_not_otsu_map():
     assert "otsu_map" not in LLMAdaptiveTileDetailer.RETURN_NAMES
 
 
+from node_detailer_adaptive import _tile_blur_sensitivity, _build_blur_sensitivity_map
+
+
+def test_blur_sensitivity_flat_tile_scores_zero():
+    canvas = torch.zeros(1, 4, 32, 32)
+    result = _tile_blur_sensitivity(canvas, [(0, 0, 16, 16)])
+    assert result[0] == pytest.approx(0.0)
+
+
+def test_blur_sensitivity_noise_scores_high_ramp_scores_low():
+    # Raw noise: a 3x3 blur destroys most gradient energy → score near 1.
+    # A smooth ramp: gradients survive blurring almost unchanged → score near 0.
+    torch.manual_seed(11)
+    noise = torch.randn(1, 4, 32, 32)
+    ramp = torch.linspace(0.0, 4.0, 32).view(1, 1, 1, 32).expand(1, 4, 32, 32).contiguous()
+    coords = [(0, 0, 32, 32)]
+    noise_score = _tile_blur_sensitivity(noise, coords)[0]
+    ramp_score = _tile_blur_sensitivity(ramp, coords)[0]
+    assert noise_score > 0.5
+    assert ramp_score < 0.2
+    assert 0.0 <= ramp_score and noise_score <= 1.0
+
+
+def test_blur_sensitivity_score_is_context_independent():
+    # Same soft quadrant must score identically alone and next to raw noise —
+    # the score is computed purely from the tile's own pixels.
+    torch.manual_seed(5)
+    ramp = torch.linspace(0.0, 1.0, 16).view(1, 1, 1, 16).expand(1, 4, 16, 16)
+    soft_alone = torch.zeros(1, 4, 32, 32)
+    soft_alone[:, :, 0:16, 0:16] = ramp
+    soft_beside_noise = soft_alone.clone()
+    soft_beside_noise[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    coords = [(0, 0, 16, 16)]
+    score_alone = _tile_blur_sensitivity(soft_alone, coords)[0]
+    score_beside = _tile_blur_sensitivity(soft_beside_noise, coords)[0]
+    assert score_alone == pytest.approx(score_beside)
+
+
+def test_blur_sensitivity_map_shape_and_range():
+    torch.manual_seed(2)
+    canvas = torch.randn(1, 4, 8, 8)
+    img = _build_blur_sensitivity_map(canvas)
+    assert img.shape == (1, 64, 64, 3)
+    assert img.min().item() >= 0.0
+    assert img.max().item() <= 1.0
+
+
+def test_scoring_method_enum_includes_blur_sensitivity():
+    methods = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]["scoring_method"][0]
+    assert "blur_sensitivity" in methods
+
+
 from node_detailer_adaptive import _tile_quadtree_density
 
 

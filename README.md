@@ -186,7 +186,7 @@ The tile grid uses whole user-sized tiles centered on the image. If the image si
 
 ### Adaptive Tiled Image Detailer
 
-Measures each tile before sampling it, then scales the denoise strength accordingly. Two scoring methods are available: `otsu_threshold` and `quadtree_density`.
+Measures each tile before sampling it, then scales the denoise strength accordingly. Three scoring methods are available: `otsu_threshold`, `quadtree_density`, and `blur_sensitivity`.
 
 Scores are **absolute**: a tile's denoise depends only on its own content, never on the other tiles in the image. This makes the node safe for batch processing with a single `denoise_min`/`denoise_max`: a uniformly soft image sits near `denoise_min` everywhere instead of having its least-soft tile promoted to `denoise_max`. (Earlier versions min-max normalized scores within each image, which made every image stretch to `denoise_max` somewhere; the `gradient_magnitude` method only made sense under that normalization and was removed with it.)
 
@@ -208,11 +208,13 @@ After scoring, each tile's raw score is blended with the average of its 4-connec
 
 **`quadtree_density`** — Runs a threshold-based quadtree over the entire canvas: a cell subdivides only while its detail (mean per-channel latent std) exceeds `split_threshold`, down to a 4-latent-pixel floor. Each tile is scored by its leaf density, normalized so 1.0 = subdivided to the floor everywhere and 0.0 = no detail anywhere. A soft image genuinely produces large leaves everywhere and low scores in every tile — the recommended method for batch processing. The scoring map shows the quadtree cell outlines (white on black) — large cells = flat, small cells = complex.
 
+**`blur_sensitivity`** — Scores each tile by how much of its gradient energy a small 3×3 blur destroys: `1 - grad_energy(blurred) / grad_energy(original)`. Fine detail is annihilated by blurring (score near 1); smooth or already-soft content barely changes (score near 0). The ratio cancels the latent's units, so no threshold or calibration is needed at all — the most direct measure of actual sharpness. The scoring map is a grayscale image where white = fine detail a blur would destroy.
+
 #### Parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `scoring_method` | `otsu_threshold` | `otsu_threshold` or `quadtree_density` |
+| `scoring_method` | `otsu_threshold` | `otsu_threshold`, `quadtree_density`, or `blur_sensitivity` |
 | `denoise_min` | 0.05 | Denoise applied to a zero-score tile. Near zero freezes it. |
 | `denoise_max` | 0.35 | Denoise applied to a full-score (1.0) tile. Soft images may never reach it — that's the point. |
 | `split_threshold` | 0.35 | Optional, `quadtree_density` only. A cell subdivides while its mean per-channel latent std exceeds this. Lower = more of the image counts as detailed. VAE latents are roughly unit-variance, so the default is a reasonable starting point across models. |
