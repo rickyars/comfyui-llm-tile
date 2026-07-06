@@ -276,6 +276,13 @@ def _build_structure_map(canvas):
 # measured soft (0.28-0.59) and detailed (1.45+) bands of real latents.
 _DEFAULT_SPLIT_THRESHOLD = 0.8
 
+# Raw leaf density that counts as a full-detail score of 1.0. The theoretical
+# maximum (every leaf at the min_cell floor) is unreachable on real content:
+# detail is heterogeneous, so subdivision stops early in the flatter parts of
+# even the busiest tile. Measured raw density on real latents: detailed
+# (faces, hair, figure groups) 0.31-0.44, soft ~0.001.
+_QUADTREE_REF = 0.45
+
 
 def _build_canvas_quadtree(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_THRESHOLD):
     """
@@ -347,13 +354,14 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4,
     _build_canvas_quadtree), then scores each tile by counting leaves whose
     center falls within it, normalized to an absolute [0, 1] scale:
 
-        score = leaves_with_center_in_tile * min_cell^2 / tile_area
+        raw = leaves_with_center_in_tile * min_cell^2 / tile_area
+        score = clamp(raw / _QUADTREE_REF, 0, 1)
 
-    min_cell^2 / tile_area is the reciprocal of the maximum possible leaf
-    count for the tile (every leaf at the min_cell floor), so 1.0 means
-    "subdivided to the limit everywhere" and 0.0 means "no detail anywhere".
-    The score is comparable across images and batches — a soft tile scores
-    low regardless of what else is in the image.
+    raw is the fraction of the tile subdivided to the min_cell floor; it is
+    referenced to _QUADTREE_REF (the ceiling actually reached by real
+    detailed latents) rather than 1.0, which real heterogeneous detail never
+    attains. The score is comparable across images and batches — a soft tile
+    scores low regardless of what else is in the image.
     """
     leaves = _build_canvas_quadtree(canvas, min_cell, split_threshold)
     result = []
@@ -367,7 +375,8 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4,
             1 for (ry, rx, rh, rw) in leaves
             if y1 <= ry + rh // 2 < y2 and x1 <= rx + rw // 2 < x2
         )
-        result.append(count * (min_cell * min_cell) / (th * tw))
+        raw = count * (min_cell * min_cell) / (th * tw)
+        result.append(min(1.0, raw / _QUADTREE_REF))
     return result
 
 

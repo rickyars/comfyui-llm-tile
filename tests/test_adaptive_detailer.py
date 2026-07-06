@@ -305,6 +305,19 @@ def test_tile_quadtree_density_is_bounded_unit_interval():
     assert result[0] == pytest.approx(1.0)
 
 
+def test_tile_quadtree_density_partial_detail_scores_high():
+    # Real detailed content is heterogeneous — subdivision never reaches the
+    # min_cell floor everywhere, so raw density tops out well below 1.0
+    # (measured ~0.45 on real detailed latents). The score must be referenced
+    # to that achievable ceiling, not the theoretical one: a tile whose left
+    # half is dense structure should read as high detail, not mid-scale.
+    canvas = _carrier(seed=21)
+    canvas[:, :, :, 0:16] += _checker(32, 16)
+    coords = [(0, 0, 32, 32)]
+    result = _tile_quadtree_density(canvas, coords)
+    assert result[0] > 0.9
+
+
 def test_tile_quadtree_density_carrier_only_canvas_scores_low_everywhere():
     # The batch-processing regression, matched to real latent behavior: a
     # canvas that is soft everywhere (carrier noise, no visible-scale
@@ -316,7 +329,7 @@ def test_tile_quadtree_density_carrier_only_canvas_scores_low_everywhere():
     coords = [(0, 0, 16, 16), (0, 16, 16, 32), (16, 0, 32, 16), (16, 16, 32, 32)]
     result = _tile_quadtree_density(canvas, coords)
     for score in result:
-        assert score < 0.1
+        assert score < 0.15
 
 
 def test_tile_quadtree_density_score_is_context_independent():
@@ -324,15 +337,16 @@ def test_tile_quadtree_density_score_is_context_independent():
     # soft quadrant scores low both alone and next to detail. A single
     # leaf-center of granularity (min_cell^2/tile_area = 0.0625 here) is
     # allowed: neighbouring detail changes the tree partition, not the score.
+    # Granularity after referencing to _QUADTREE_REF: 0.0625 / 0.45 ≈ 0.139.
     soft_alone = _carrier(seed=3)
     soft_beside_detail = soft_alone.clone()
     soft_beside_detail[:, :, 16:32, 16:32] += _checker(16, 16)
     coords = [(0, 0, 16, 16)]
     score_alone = _tile_quadtree_density(soft_alone, coords)[0]
     score_beside = _tile_quadtree_density(soft_beside_detail, coords)[0]
-    assert score_alone < 0.1
-    assert score_beside < 0.1
-    assert abs(score_alone - score_beside) <= 0.0625 + 1e-6
+    assert score_alone < 0.15
+    assert score_beside < 0.15
+    assert abs(score_alone - score_beside) <= 0.0625 / 0.45 + 1e-6
 
 
 def test_scoring_method_enum_includes_quadtree_density():
