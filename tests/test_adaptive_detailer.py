@@ -212,6 +212,22 @@ def test_blur_sensitivity_flat_tile_scores_zero():
     assert result[0] == pytest.approx(0.0)
 
 
+def test_blur_sensitivity_low_amplitude_noise_scores_low():
+    # Regression: near-flat regions with a whisper of noise (VAE dither, grain)
+    # must NOT register as detail. The bare energy ratio scored these ~0.96
+    # because their only gradient energy was high-frequency; the energy floor
+    # collapses that to near zero while leaving real detail untouched.
+    torch.manual_seed(0)
+    flat_noisy = 0.01 * torch.randn(1, 4, 32, 32)
+    soft_noisy = (torch.linspace(0, 0.5, 32).view(1, 1, 1, 32).expand(1, 4, 32, 32)
+                  + 0.02 * torch.randn(1, 4, 32, 32))
+    detailed = torch.randn(1, 4, 32, 32)
+    coords = [(0, 0, 32, 32)]
+    assert _tile_blur_sensitivity(flat_noisy, coords)[0] < 0.15
+    assert _tile_blur_sensitivity(soft_noisy, coords)[0] < 0.25
+    assert _tile_blur_sensitivity(detailed, coords)[0] > 0.5
+
+
 def test_blur_sensitivity_noise_scores_high_ramp_scores_low():
     # Raw noise: a 3x3 blur destroys most gradient energy → score near 1.
     # A smooth ramp: gradients survive blurring almost unchanged → score near 0.

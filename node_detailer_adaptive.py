@@ -219,29 +219,36 @@ def _grad_energy(x):
     return dx.pow(2).mean().item() + dy.pow(2).mean().item()
 
 
+# Gradient-energy floor for blur_sensitivity, in squared-latent-gradient units.
+# The bare ratio is amplitude-blind: a near-flat region whose only gradient
+# energy is low-amplitude noise (VAE dither, grain) scores ~1 because blurring
+# destroys noise just as thoroughly as real detail. Energy near this floor
+# collapses the score to 0; energy well above it leaves the ratio unchanged.
+# Unit-variance raw noise has energy ~4; observed soft/flat latent regions sit
+# around 1e-3 or below.
+_BLUR_ENERGY_FLOOR = 0.01
+
+
 def _tile_blur_sensitivity(canvas, tile_coords):
     """
     Score tiles by how much of their gradient energy a small blur destroys:
 
-        score = 1 - grad_energy(blurred_tile) / grad_energy(tile)
+        score = 1 - (grad_energy(blurred) + floor) / (grad_energy(tile) + floor)
 
-    Fine detail (noise, texture, sharp edges) is annihilated by a 3x3 blur, so
-    detailed tiles score near 1. Smooth content (soft gradients, blurry or flat
-    regions) barely changes under blurring, so soft tiles score near 0. The
-    ratio cancels the latent's units, making the score an absolute [0, 1]
-    sharpness measure — comparable across tiles, images, and batches with no
-    calibration and no threshold.
+    Fine detail (texture, sharp edges) is annihilated by a 3x3 blur, so
+    detailed tiles score near 1. Smooth content barely changes under blurring,
+    and near-flat content has energy at the noise floor — both score near 0.
+    The score is an absolute [0, 1] sharpness measure, comparable across
+    tiles, images, and batches.
     """
     blurred = F.avg_pool2d(canvas, kernel_size=3, stride=1, padding=1,
                            count_include_pad=False)
     result = []
     for (y1, x1, y2, x2) in tile_coords:
         e = _grad_energy(canvas[:, :, y1:y2, x1:x2])
-        if e <= _QUIET_SCORE_EPSILON:
-            result.append(0.0)
-            continue
         eb = _grad_energy(blurred[:, :, y1:y2, x1:x2])
-        result.append(max(0.0, 1.0 - eb / e))
+        score = 1.0 - (eb + _BLUR_ENERGY_FLOOR) / (e + _BLUR_ENERGY_FLOOR)
+        result.append(max(0.0, score))
     return result
 
 
@@ -270,8 +277,7 @@ def _build_blur_sensitivity_map(canvas, window=5):
                      count_include_pad=False)
     eb = F.avg_pool2d(_sq_grad(blurred), window, stride=1, padding=pad,
                       count_include_pad=False)
-    mask = (1.0 - eb / (e + _QUIET_SCORE_EPSILON)).clamp(0.0, 1.0)
-    mask = mask * (e > _QUIET_SCORE_EPSILON)
+    mask = (1.0 - (eb + _BLUR_ENERGY_FLOOR) / (e + _BLUR_ENERGY_FLOOR)).clamp(0.0, 1.0)
 
     img = mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
     return img.repeat_interleave(8, dim=1).repeat_interleave(8, dim=2)
