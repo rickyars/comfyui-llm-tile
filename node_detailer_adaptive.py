@@ -210,111 +210,94 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows, ti
     return img
 
 
-def _grad_energy(x):
-    """Mean squared forward-difference gradient of a [B, C, h, w] region."""
-    if x.shape[2] < 2 or x.shape[3] < 2:
-        return 0.0
-    dx = x[:, :, :, 1:] - x[:, :, :, :-1]
-    dy = x[:, :, 1:, :] - x[:, :, :-1, :]
-    return dx.pow(2).mean().item() + dy.pow(2).mean().item()
+# --- Latent structure energy ------------------------------------------------
+# VAE latents (measured on the Z-Image / Flux ae) carry a high-amplitude,
+# high-frequency "carrier" regardless of pixel content: raw latent gradient
+# energy is ~2.2 for soft image regions and ~2.5 for detailed ones — useless
+# for telling them apart, and blur-ratio measures saturate at ~0.93 everywhere.
+# Downsampling the latent 4x averages the carrier away; the gradient energy of
+# what survives is actual image structure. Measured on real 1024px-tile
+# latents: soft (sky, dark backgrounds, smooth skin) 0.28-0.59, detailed
+# (faces, hair, figure groups) 1.45-1.62.
+_STRUCTURE_POOL = 4
+# Energy that counts as a full-detail score of 1.0 (see measurements above).
+_STRUCTURE_REF = 2.0
 
 
-# Gradient-energy floor for blur_sensitivity, in squared-latent-gradient units.
-# The bare ratio is amplitude-blind: a near-flat region whose only gradient
-# energy is low-amplitude noise (VAE dither, grain) scores ~1 because blurring
-# destroys noise just as thoroughly as real detail. Energy near this floor
-# collapses the score to 0; energy well above it leaves the ratio unchanged.
-# Unit-variance raw noise has energy ~4; observed soft/flat latent regions sit
-# around 1e-3 or below.
-_BLUR_ENERGY_FLOOR = 0.01
-
-
-def _tile_blur_sensitivity(canvas, tile_coords):
+def _latent_structure_map(canvas):
     """
-    Score tiles by how much of their gradient energy a small blur destroys:
+    Per-latent-pixel structure-energy map [B, 1, H, W].
 
-        score = 1 - (grad_energy(blurred) + floor) / (grad_energy(tile) + floor)
-
-    Fine detail (texture, sharp edges) is annihilated by a 3x3 blur, so
-    detailed tiles score near 1. Smooth content barely changes under blurring,
-    and near-flat content has energy at the noise floor — both score near 0.
-    The score is an absolute [0, 1] sharpness measure, comparable across
-    tiles, images, and batches.
+    Squared forward-difference gradients of the 4x-downsampled latent
+    (channel-mean), upsampled back to latent resolution with nearest so
+    regions can be scored at any granularity.
     """
-    blurred = F.avg_pool2d(canvas, kernel_size=3, stride=1, padding=1,
-                           count_include_pad=False)
+    p = F.avg_pool2d(canvas.detach().cpu(), _STRUCTURE_POOL)
+    g = torch.zeros(p.shape[0], 1, p.shape[2], p.shape[3])
+    if p.shape[2] >= 2 and p.shape[3] >= 2:
+        dx = (p[:, :, :, 1:] - p[:, :, :, :-1]).pow(2).mean(dim=1, keepdim=True)
+        dy = (p[:, :, 1:, :] - p[:, :, :-1, :]).pow(2).mean(dim=1, keepdim=True)
+        g[:, :, :, :-1] += dx
+        g[:, :, :-1, :] += dy
+    return F.interpolate(g, size=canvas.shape[-2:], mode="nearest")
+
+
+def _tile_structure_energy(canvas, tile_coords):
+    """
+    Score tiles by mean structure energy, normalized so _STRUCTURE_REF -> 1.0:
+
+        score = clamp(mean(structure_map[tile]) / _STRUCTURE_REF, 0, 1)
+
+    An absolute [0, 1] detail measure calibrated on real Z-Image VAE latents:
+    soft regions land around 0.15-0.3, detailed regions around 0.7-0.8+.
+    Comparable across tiles, images, and batches.
+    """
+    smap = _latent_structure_map(canvas)
     result = []
     for (y1, x1, y2, x2) in tile_coords:
-        e = _grad_energy(canvas[:, :, y1:y2, x1:x2])
-        eb = _grad_energy(blurred[:, :, y1:y2, x1:x2])
-        score = 1.0 - (eb + _BLUR_ENERGY_FLOOR) / (e + _BLUR_ENERGY_FLOOR)
-        result.append(max(0.0, score))
+        e = smap[:, :, y1:y2, x1:x2].mean().item()
+        result.append(min(1.0, e / _STRUCTURE_REF))
     return result
 
 
-def _build_blur_sensitivity_map(canvas, window=5):
+def _build_structure_map(canvas):
     """
-    Pixel-space grayscale preview of local blur sensitivity: white = gradient
-    energy that a 3x3 blur would destroy (fine detail), black = smooth/flat.
+    Pixel-space grayscale preview of latent structure energy:
+    white = full-detail energy (>= _STRUCTURE_REF), black = no structure.
 
     Returns: IMAGE tensor [1, H*8, W*8, 3]
     """
-    def _sq_grad(x):
-        g = torch.zeros(x.shape[0], 1, x.shape[2], x.shape[3])
-        if x.shape[2] < 2 or x.shape[3] < 2:
-            return g
-        dx = (x[:, :, :, 1:] - x[:, :, :, :-1]).pow(2).mean(dim=1, keepdim=True)
-        dy = (x[:, :, 1:, :] - x[:, :, :-1, :]).pow(2).mean(dim=1, keepdim=True)
-        g[:, :, :, :-1] += dx
-        g[:, :, :-1, :] += dy
-        return g
-
-    canvas = canvas.detach().cpu()
-    blurred = F.avg_pool2d(canvas, kernel_size=3, stride=1, padding=1,
-                           count_include_pad=False)
-    pad = window // 2
-    e = F.avg_pool2d(_sq_grad(canvas), window, stride=1, padding=pad,
-                     count_include_pad=False)
-    eb = F.avg_pool2d(_sq_grad(blurred), window, stride=1, padding=pad,
-                      count_include_pad=False)
-    mask = (1.0 - (eb + _BLUR_ENERGY_FLOOR) / (e + _BLUR_ENERGY_FLOOR)).clamp(0.0, 1.0)
-
+    mask = (_latent_structure_map(canvas) / _STRUCTURE_REF).clamp(0.0, 1.0)
     img = mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
     return img.repeat_interleave(8, dim=1).repeat_interleave(8, dim=2)
 
 
-_DEFAULT_SPLIT_THRESHOLD = 0.35
-
-
-def _region_detail(sample, ry, rx, rh, rw):
-    """Mean per-channel std of a region — channel-count invariant, so the same
-    split_threshold works for 4-channel (SDXL) and 16-channel (z-image) latents."""
-    if rh * rw < 2:
-        return 0.0
-    return sample[:, ry:ry + rh, rx:rx + rw].std(dim=[1, 2]).mean().item()
+# Structure energy above which a quadtree cell subdivides. Sits between the
+# measured soft (0.28-0.59) and detailed (1.45+) bands of real latents.
+_DEFAULT_SPLIT_THRESHOLD = 0.8
 
 
 def _build_canvas_quadtree(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_THRESHOLD):
     """
     Run a threshold-based quadtree over the whole canvas.
 
-    A cell splits only when it holds sufficient information — detail (mean
-    per-channel std) above split_threshold — and stops at min_cell. There is
-    no subdivision budget and no competition between regions: whether a cell
-    splits depends only on its own content, so the resulting leaf structure
-    is an absolute measure. A uniformly soft canvas genuinely produces few,
-    large leaves everywhere (the earlier greedy-heap design force-spent a
-    budget on "the least soft of the soft", manufacturing density on images
-    that had no detail at all).
+    A cell splits only when it holds sufficient information — mean structure
+    energy (see _latent_structure_map) above split_threshold — and stops at
+    min_cell. There is no subdivision budget and no competition between
+    regions: whether a cell splits depends only on its own content, so the
+    resulting leaf structure is an absolute measure. A uniformly soft canvas
+    genuinely produces few, large leaves everywhere.
+
+    Structure energy rather than raw latent std is essential: real VAE
+    latents have std ~1-3 *everywhere* (soft or detailed), so a std-based
+    criterion subdivides soft images just as heavily as detailed ones.
 
     Recursion is bounded by min_cell, so no iteration cap is needed.
 
     Returns: list of (ry, rx, rh, rw) leaf cells covering the full canvas.
     """
-    # _region_detail (.std().item()) runs once per visited cell; on a GPU
-    # tensor each .item() is a device sync, so score on CPU instead.
-    sample = canvas[0].detach().cpu()  # [C, H, W]
-    _, H, W = sample.shape
+    smap = _latent_structure_map(canvas)[0, 0]  # [H, W] CPU
+    H, W = smap.shape
 
     stack = [(0, 0, H, W)]
     leaves = []
@@ -328,7 +311,7 @@ def _build_canvas_quadtree(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_TH
         can_w = half_w >= min_cell
 
         if (not can_h and not can_w) or \
-                _region_detail(sample, ry, rx, rh, rw) <= split_threshold:
+                smap[ry:ry + rh, rx:rx + rw].mean().item() <= split_threshold:
             leaves.append((ry, rx, rh, rw))
             continue
 
@@ -430,7 +413,7 @@ class LLMAdaptiveTileDetailer:
                 "cfg": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "step": 0.1}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "scoring_method": (["otsu_threshold", "quadtree_density", "blur_sensitivity"], {"default": "otsu_threshold"}),
+                "scoring_method": (["otsu_threshold", "quadtree_density", "structure_energy"], {"default": "otsu_threshold"}),
                 "denoise_min": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "denoise_max": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "curve": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 5.0, "step": 0.01}),
@@ -444,8 +427,8 @@ class LLMAdaptiveTileDetailer:
                                       "tooltip": "Eta for highest-denoise tiles. Scales linearly from eta_min (at denoise_min) to eta_max (at denoise_max)."}),
             },
             "optional": {
-                "split_threshold": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0, "step": 0.01,
-                                              "tooltip": "quadtree_density only: a cell subdivides while its mean per-channel latent std exceeds this. Lower = more sensitive (more tiles count as detailed). VAE latents are roughly unit-variance, so the default suits most models."}),
+                "split_threshold": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 5.0, "step": 0.01,
+                                              "tooltip": "quadtree_density only: a cell subdivides while its mean structure energy exceeds this. Lower = more of the image counts as detailed. Calibrated on real Z-Image VAE latents: soft regions measure ~0.3-0.6, detailed ~1.4+."}),
             }
         }
 
@@ -513,9 +496,9 @@ class LLMAdaptiveTileDetailer:
         elif scoring_method == "quadtree_density":
             scores = _tile_quadtree_density(canvas, tile_coords, split_threshold=split_threshold)
             scoring_map_img = _build_quadtree_map(canvas, split_threshold=split_threshold)
-        elif scoring_method == "blur_sensitivity":
-            scores = _tile_blur_sensitivity(canvas, tile_coords)
-            scoring_map_img = _build_blur_sensitivity_map(canvas)
+        elif scoring_method == "structure_energy":
+            scores = _tile_structure_energy(canvas, tile_coords)
+            scoring_map_img = _build_structure_map(canvas)
         else:
             raise ValueError(f"Unknown scoring_method: {scoring_method!r}")
 

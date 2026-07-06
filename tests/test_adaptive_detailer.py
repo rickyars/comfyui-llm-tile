@@ -203,72 +203,68 @@ def test_return_names_uses_scoring_map_not_otsu_map():
     assert "otsu_map" not in LLMAdaptiveTileDetailer.RETURN_NAMES
 
 
-from node_detailer_adaptive import _tile_blur_sensitivity, _build_blur_sensitivity_map
+from node_detailer_adaptive import _tile_structure_energy, _build_structure_map
 
 
-def test_blur_sensitivity_flat_tile_scores_zero():
+def _carrier(h=32, w=32, seed=0, amp=1.0):
+    """Real VAE latents carry unit-amplitude high-frequency noise regardless
+    of pixel content (measured on the Z-Image ae). Synthetic fixtures must
+    include it or they test a latent that doesn't exist."""
+    torch.manual_seed(seed)
+    return amp * torch.randn(1, 4, h, w)
+
+
+def _checker(h=32, w=32, block=4, amp=2.0):
+    """Block checkerboard — structure that survives 4x downsampling, standing
+    in for real image detail (edges, faces, texture at visible scale)."""
+    yy, xx = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
+    c = (((yy // block + xx // block) % 2).float() * 2.0 - 1.0) * amp
+    return c.view(1, 1, h, w).expand(1, 4, h, w).contiguous()
+
+
+def test_structure_energy_flat_tile_scores_zero():
     canvas = torch.zeros(1, 4, 32, 32)
-    result = _tile_blur_sensitivity(canvas, [(0, 0, 16, 16)])
+    result = _tile_structure_energy(canvas, [(0, 0, 16, 16)])
     assert result[0] == pytest.approx(0.0)
 
 
-def test_blur_sensitivity_low_amplitude_noise_scores_low():
-    # Regression: near-flat regions with a whisper of noise (VAE dither, grain)
-    # must NOT register as detail. The bare energy ratio scored these ~0.96
-    # because their only gradient energy was high-frequency; the energy floor
-    # collapses that to near zero while leaving real detail untouched.
-    torch.manual_seed(0)
-    flat_noisy = 0.01 * torch.randn(1, 4, 32, 32)
-    soft_noisy = (torch.linspace(0, 0.5, 32).view(1, 1, 1, 32).expand(1, 4, 32, 32)
-                  + 0.02 * torch.randn(1, 4, 32, 32))
-    detailed = torch.randn(1, 4, 32, 32)
+def test_structure_energy_carrier_noise_scores_low_structure_scores_high():
+    # The core real-latent regression (user's batch bug, verified against
+    # actual Z-Image VAE encodes): the high-frequency carrier alone — what a
+    # soft region's latent looks like — must score low, while carrier plus
+    # visible-scale structure must score high. Raw-gradient and blur-ratio
+    # measures could not tell these apart (both ~0.9).
+    soft = _carrier(seed=0) + torch.linspace(0, 0.5, 32).view(1, 1, 1, 32)
+    detailed = _carrier(seed=1) + _checker()
     coords = [(0, 0, 32, 32)]
-    assert _tile_blur_sensitivity(flat_noisy, coords)[0] < 0.15
-    assert _tile_blur_sensitivity(soft_noisy, coords)[0] < 0.25
-    assert _tile_blur_sensitivity(detailed, coords)[0] > 0.5
+    assert _tile_structure_energy(soft, coords)[0] < 0.3
+    assert _tile_structure_energy(detailed, coords)[0] > 0.6
 
 
-def test_blur_sensitivity_noise_scores_high_ramp_scores_low():
-    # Raw noise: a 3x3 blur destroys most gradient energy → score near 1.
-    # A smooth ramp: gradients survive blurring almost unchanged → score near 0.
-    torch.manual_seed(11)
-    noise = torch.randn(1, 4, 32, 32)
-    ramp = torch.linspace(0.0, 4.0, 32).view(1, 1, 1, 32).expand(1, 4, 32, 32).contiguous()
-    coords = [(0, 0, 32, 32)]
-    noise_score = _tile_blur_sensitivity(noise, coords)[0]
-    ramp_score = _tile_blur_sensitivity(ramp, coords)[0]
-    assert noise_score > 0.5
-    assert ramp_score < 0.2
-    assert 0.0 <= ramp_score and noise_score <= 1.0
-
-
-def test_blur_sensitivity_score_is_context_independent():
-    # Same soft quadrant must score identically alone and next to raw noise —
+def test_structure_energy_score_is_context_independent():
+    # Same soft quadrant must score identically alone and next to detail —
     # the score is computed purely from the tile's own pixels.
-    torch.manual_seed(5)
-    ramp = torch.linspace(0.0, 1.0, 16).view(1, 1, 1, 16).expand(1, 4, 16, 16)
-    soft_alone = torch.zeros(1, 4, 32, 32)
-    soft_alone[:, :, 0:16, 0:16] = ramp
-    soft_beside_noise = soft_alone.clone()
-    soft_beside_noise[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    soft_alone = _carrier(seed=5)
+    soft_beside_detail = soft_alone.clone()
+    soft_beside_detail[:, :, 16:32, 16:32] += _checker(16, 16)
     coords = [(0, 0, 16, 16)]
-    score_alone = _tile_blur_sensitivity(soft_alone, coords)[0]
-    score_beside = _tile_blur_sensitivity(soft_beside_noise, coords)[0]
+    score_alone = _tile_structure_energy(soft_alone, coords)[0]
+    score_beside = _tile_structure_energy(soft_beside_detail, coords)[0]
     assert score_alone == pytest.approx(score_beside)
 
 
-def test_blur_sensitivity_map_shape_and_range():
-    torch.manual_seed(2)
-    canvas = torch.randn(1, 4, 8, 8)
-    img = _build_blur_sensitivity_map(canvas)
+def test_structure_map_shape_and_range():
+    canvas = _carrier(8, 8, seed=2)
+    img = _build_structure_map(canvas)
     assert img.shape == (1, 64, 64, 3)
     assert img.min().item() >= 0.0
     assert img.max().item() <= 1.0
 
 
-def test_scoring_method_enum_includes_blur_sensitivity():
+def test_scoring_method_enum_includes_structure_energy():
     methods = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]["scoring_method"][0]
-    assert "blur_sensitivity" in methods
+    assert "structure_energy" in methods
+    assert "blur_sensitivity" not in methods
 
 
 from node_detailer_adaptive import _tile_quadtree_density
@@ -284,8 +280,7 @@ def test_tile_quadtree_density_flat_canvas_scores_zero():
 
 
 def test_tile_quadtree_density_complex_higher_than_flat():
-    torch.manual_seed(42)
-    canvas_complex = torch.randn(1, 4, 32, 32)
+    canvas_complex = _carrier(seed=42) + _checker()
     canvas_flat = torch.zeros(1, 4, 32, 32)
     coords = [(0, 0, 16, 16)]
     flat_score = _tile_quadtree_density(canvas_flat, coords)
@@ -294,49 +289,47 @@ def test_tile_quadtree_density_complex_higher_than_flat():
 
 
 def test_tile_quadtree_density_ranks_tiles_correctly():
-    # Top-left quadrant: zeros (flat). Bottom-right: random (complex).
-    torch.manual_seed(99)
-    canvas = torch.zeros(1, 4, 32, 32)
-    canvas[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    # Top-left quadrant: carrier only (soft). Bottom-right: carrier + structure.
+    canvas = _carrier(seed=99)
+    canvas[:, :, 16:32, 16:32] += _checker(16, 16)
     coords = [(0, 0, 16, 16), (16, 16, 32, 32)]
     result = _tile_quadtree_density(canvas, coords)
     assert result[0] < result[1]
 
 
 def test_tile_quadtree_density_is_bounded_unit_interval():
-    # Fully subdivided tile (raw noise splits to the min_cell floor) → exactly 1.0.
-    torch.manual_seed(7)
-    canvas = torch.randn(1, 4, 32, 32)
+    # Structure everywhere subdivides to the min_cell floor → exactly 1.0.
+    canvas = _carrier(seed=7) + _checker()
     coords = [(0, 0, 32, 32)]
     result = _tile_quadtree_density(canvas, coords)
     assert result[0] == pytest.approx(1.0)
 
 
-def test_tile_quadtree_density_uniformly_soft_canvas_scores_low_everywhere():
-    # The batch-processing regression: a canvas that is soft *everywhere* must
-    # score low in every tile, not have its least-soft tile promoted to 1.0.
-    # Low-amplitude smooth ramp: std well below split_threshold in every cell.
-    ramp = torch.linspace(0.0, 0.2, 32).view(1, 1, 1, 32).expand(1, 4, 32, 32)
+def test_tile_quadtree_density_carrier_only_canvas_scores_low_everywhere():
+    # The batch-processing regression, matched to real latent behavior: a
+    # canvas that is soft everywhere (carrier noise, no visible-scale
+    # structure) must score low in every tile — not have its least-soft tile
+    # promoted, and not have the carrier itself mistaken for detail (the old
+    # std-based criterion did exactly that: real latents have std ~1-3
+    # everywhere, so every cell subdivided and every tile scored 1.0).
+    canvas = _carrier(seed=13)
     coords = [(0, 0, 16, 16), (0, 16, 16, 32), (16, 0, 32, 16), (16, 16, 32, 32)]
-    result = _tile_quadtree_density(ramp.contiguous(), coords)
+    result = _tile_quadtree_density(canvas, coords)
     for score in result:
         assert score < 0.1
 
 
 def test_tile_quadtree_density_score_is_context_independent():
     # A tile's score must not depend on what else is in the image: the same
-    # soft quadrant scores low both alone and next to raw noise. (Under the
-    # old min-max normalization the soft tile mapped to t=0 in the mixed
-    # image but t could reach 1.0 when the whole image was soft.) A single
+    # soft quadrant scores low both alone and next to detail. A single
     # leaf-center of granularity (min_cell^2/tile_area = 0.0625 here) is
     # allowed: neighbouring detail changes the tree partition, not the score.
-    torch.manual_seed(3)
-    soft_alone = torch.zeros(1, 4, 32, 32)
-    soft_beside_noise = torch.zeros(1, 4, 32, 32)
-    soft_beside_noise[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    soft_alone = _carrier(seed=3)
+    soft_beside_detail = soft_alone.clone()
+    soft_beside_detail[:, :, 16:32, 16:32] += _checker(16, 16)
     coords = [(0, 0, 16, 16)]
     score_alone = _tile_quadtree_density(soft_alone, coords)[0]
-    score_beside = _tile_quadtree_density(soft_beside_noise, coords)[0]
+    score_beside = _tile_quadtree_density(soft_beside_detail, coords)[0]
     assert score_alone < 0.1
     assert score_beside < 0.1
     assert abs(score_alone - score_beside) <= 0.0625 + 1e-6
@@ -356,16 +349,14 @@ def test_build_canvas_quadtree_flat_returns_one_leaf():
 
 
 def test_build_canvas_quadtree_complex_returns_multiple_leaves():
-    torch.manual_seed(42)
-    canvas = torch.randn(1, 4, 32, 32)
+    canvas = _carrier(seed=42) + _checker()
     leaves = _build_canvas_quadtree(canvas)
     assert len(leaves) > 4
 
 
 def test_build_canvas_quadtree_leaves_partition_canvas():
     # Every latent cell must be covered by exactly one leaf (no gaps, no overlaps).
-    torch.manual_seed(42)
-    canvas = torch.randn(1, 4, 32, 32)
+    canvas = _carrier(seed=42) + _checker()
     leaves = _build_canvas_quadtree(canvas)
     coverage = torch.zeros(32, 32, dtype=torch.int)
     for (ry, rx, rh, rw) in leaves:
@@ -374,11 +365,10 @@ def test_build_canvas_quadtree_leaves_partition_canvas():
 
 
 def test_build_canvas_quadtree_complex_region_gets_more_leaves():
-    # Bottom-right quadrant is complex; top-left is flat.
-    # Only cells whose detail exceeds split_threshold subdivide.
-    torch.manual_seed(0)
-    canvas = torch.zeros(1, 4, 32, 32)
-    canvas[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    # Bottom-right quadrant has structure; top-left is carrier-only (soft).
+    # Only cells whose structure energy exceeds split_threshold subdivide.
+    canvas = _carrier(seed=0)
+    canvas[:, :, 16:32, 16:32] += _checker(16, 16)
     leaves = _build_canvas_quadtree(canvas)
     # Count leaves whose origin AND full extent lie within each quadrant
     flat_leaves = [l for l in leaves if l[0] + l[2] <= 16 and l[1] + l[3] <= 16]
@@ -452,10 +442,9 @@ def test_adaptive_detail_eta_varies_across_tiles():
     comfy.samplers.ksampler = capturing
     try:
         canvas = torch.zeros(1, 4, 32, 32)
-        # Bottom-right 16x16 latent block: alternating 0/1 checkerboard
-        for i in range(16):
-            for j in range(16):
-                canvas[:, :, 16 + i, 16 + j] = float((i + j) % 2)
+        # Bottom-right 16x16 latent block: 4px-block checkerboard — structure
+        # that survives the 4x downsample the structure-energy measure uses.
+        canvas[:, :, 16:32, 16:32] = _checker(16, 16)
         node = LLMAdaptiveTileDetailer()
         node.detail(
             model=_make_model_mock(),

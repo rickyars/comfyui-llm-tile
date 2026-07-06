@@ -186,7 +186,7 @@ The tile grid uses whole user-sized tiles centered on the image. If the image si
 
 ### Adaptive Tiled Image Detailer
 
-Measures each tile before sampling it, then scales the denoise strength accordingly. Three scoring methods are available: `otsu_threshold`, `quadtree_density`, and `blur_sensitivity`.
+Measures each tile before sampling it, then scales the denoise strength accordingly. Three scoring methods are available: `otsu_threshold`, `quadtree_density`, and `structure_energy`.
 
 Scores are **absolute**: a tile's denoise depends only on its own content, never on the other tiles in the image. This makes the node safe for batch processing with a single `denoise_min`/`denoise_max`: a uniformly soft image sits near `denoise_min` everywhere instead of having its least-soft tile promoted to `denoise_max`. (Earlier versions min-max normalized scores within each image, which made every image stretch to `denoise_max` somewhere; the `gradient_magnitude` method only made sense under that normalization and was removed with it.)
 
@@ -206,18 +206,20 @@ After scoring, each tile's raw score is blended with the average of its 4-connec
 
 **`otsu_threshold`** — Averages latent channels into a single intensity map, normalizes to [0, 1], computes a global Otsu threshold, and scores each tile by its fraction of bright-class (above-threshold) pixels — an absolute coverage fraction. The scoring map is a black/white image where white = above threshold. Works well when the image has a clear bimodal intensity distribution. Note it measures *subject coverage*, not sharpness: a soft image with a bright subject still scores high.
 
-**`quadtree_density`** — Runs a threshold-based quadtree over the entire canvas: a cell subdivides only while its detail (mean per-channel latent std) exceeds `split_threshold`, down to a 4-latent-pixel floor. Each tile is scored by its leaf density, normalized so 1.0 = subdivided to the floor everywhere and 0.0 = no detail anywhere. A soft image genuinely produces large leaves everywhere and low scores in every tile — the recommended method for batch processing. The scoring map shows the quadtree cell outlines (white on black) — large cells = flat, small cells = complex.
+Both `quadtree_density` and `structure_energy` are built on **structure energy**: the gradient energy of the 4×-downsampled latent. Raw latent statistics can't measure softness — VAE latents carry a high-amplitude, high-frequency carrier regardless of pixel content (measured on the Z-Image VAE: raw gradient energy is ~2.2 for soft regions vs ~2.5 for detailed ones). Downsampling averages the carrier away; what survives is actual image structure, which separates soft from detailed regions by roughly 3× (~0.3–0.6 vs ~1.4–1.6 on real latents).
 
-**`blur_sensitivity`** — Scores each tile by how much of its gradient energy a small 3×3 blur destroys: `1 - grad_energy(blurred) / grad_energy(original)`. Fine detail is annihilated by blurring (score near 1); smooth or already-soft content barely changes (score near 0). The ratio cancels the latent's units, so no threshold or calibration is needed at all — the most direct measure of actual sharpness. The scoring map is a grayscale image where white = fine detail a blur would destroy.
+**`quadtree_density`** — Runs a threshold-based quadtree over the entire canvas: a cell subdivides only while its mean structure energy exceeds `split_threshold`, down to a 4-latent-pixel floor. Each tile is scored by its leaf density, normalized so 1.0 = subdivided to the floor everywhere and 0.0 = no detail anywhere. Measured on real latents: soft regions ~0.0, detailed ~0.3–0.45, so pair it with `curve` < 1 or a generous `denoise_max`. The scoring map shows the quadtree cell outlines (white on black) — large cells = flat, small cells = complex.
+
+**`structure_energy`** — Scores each tile by its mean structure energy directly, normalized so 2.0 (full-detail energy on real latents) → 1.0. Measured on real latents: soft regions 0.14–0.29, detailed 0.70–0.78 — the widest, most linear spread of the three methods and the recommended default for batch processing. The scoring map is a grayscale image where white = image structure, black = soft/flat.
 
 #### Parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `scoring_method` | `otsu_threshold` | `otsu_threshold`, `quadtree_density`, or `blur_sensitivity` |
+| `scoring_method` | `otsu_threshold` | `otsu_threshold`, `quadtree_density`, or `structure_energy` |
 | `denoise_min` | 0.05 | Denoise applied to a zero-score tile. Near zero freezes it. |
 | `denoise_max` | 0.35 | Denoise applied to a full-score (1.0) tile. Soft images may never reach it — that's the point. |
-| `split_threshold` | 0.35 | Optional, `quadtree_density` only. A cell subdivides while its mean per-channel latent std exceeds this. Lower = more of the image counts as detailed. VAE latents are roughly unit-variance, so the default is a reasonable starting point across models. |
+| `split_threshold` | 0.8 | Optional, `quadtree_density` only. A cell subdivides while its mean structure energy exceeds this. Lower = more of the image counts as detailed. Calibrated on real Z-Image VAE latents (soft ~0.3–0.6, detailed ~1.4+). |
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended using a smoothstep curve to hide seams. |
