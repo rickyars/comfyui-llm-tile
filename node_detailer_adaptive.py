@@ -1,4 +1,3 @@
-import heapq
 import torch
 import comfy.sample
 import comfy.model_management
@@ -17,32 +16,6 @@ else:
         check_eta_support, prepare_noise_typed, build_tile_sampler,
         NOISE_GENERATOR_NAMES_SIMPLE, pad_latent_to_grid,
     )
-
-
-def _tile_complexity(canvas, tile_coords):
-    """
-    canvas: [B, C, H, W] latent tensor
-    tile_coords: list of (y1, x1, y2, x2) in latent space
-    Returns: list of float — mean absolute gradient magnitude per tile.
-
-    Uses gradient magnitude rather than variance so that edges (face contours,
-    hair, object boundaries) register as complex even when the interior is smooth.
-    Flat uniform regions (dark backgrounds, plain walls) return near zero.
-    """
-    result = []
-    for (y1, x1, y2, x2) in tile_coords:
-        tile = canvas[:, :, y1:y2, x1:x2]
-        if tile.shape[2] <= 1 or tile.shape[3] <= 1:
-            result.append(0.0)
-            continue
-
-        dx = (tile[:, :, :-1, 1:] - tile[:, :, :-1, :-1]).abs()
-        dy = (tile[:, :, 1:, :-1] - tile[:, :, :-1, :-1]).abs()
-        grad = (dx + dy).mean(dim=1).flatten()
-
-        k = max(1, int(grad.numel() * 0.10))
-        result.append(grad.topk(k).values.mean().item())
-    return result
 
 
 def _otsu_threshold(values, bins=256):
@@ -118,27 +91,23 @@ def _build_otsu_map(canvas):
 
 def _scores_to_denoise(scores, curve, denoise_min, denoise_max):
     """
-    scores: list of float complexity values (one per tile)
+    scores: list of float in [0, 1] — absolute per-tile detail scores
     curve: gamma exponent; >1 biases most tiles toward denoise_min
     Returns: list of (t, denoise) tuples where
-      t      — pre-curve normalized score in [0,1] (used for heatmap)
+      t      — the (clamped) input score, used for the heatmap
       denoise — final per-tile denoise value
-    """
-    if not scores:
-        return []
 
-    v_min = min(scores)
-    v_max = max(scores)
+    The mapping is absolute: a tile's denoise depends only on its own score,
+    never on the other tiles in the image. Earlier versions min-max normalized
+    scores within the image, which made every image — however soft — stretch
+    to denoise_max somewhere; that made batch processing with fixed min/max
+    impossible (a soft tile's denoise depended on what it shared the image with).
+    Both scoring methods now emit scores that are already meaningful in [0, 1].
+    """
     result = []
     for v in scores:
-        if v_max == v_min:
-            # Equal and flat means there is no evidence that any region deserves
-            # the high-denoise path. Equal but non-flat still benefits from it.
-            t = 0.0 if v_max <= _QUIET_SCORE_EPSILON else 1.0
-        else:
-            t = (v - v_min) / (v_max - v_min)
-        t_curved = t ** curve
-        denoise = denoise_min + t_curved * (denoise_max - denoise_min)
+        t = max(0.0, min(1.0, v))
+        denoise = denoise_min + (t ** curve) * (denoise_max - denoise_min)
         result.append((t, denoise))
     return result
 
@@ -240,56 +209,52 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows, ti
     return img
 
 
+_DEFAULT_SPLIT_THRESHOLD = 0.35
+
+
 def _region_detail(sample, ry, rx, rh, rw):
+    """Mean per-channel std of a region — channel-count invariant, so the same
+    split_threshold works for 4-channel (SDXL) and 16-channel (z-image) latents."""
     if rh * rw < 2:
         return 0.0
-    return sample[:, ry:ry + rh, rx:rx + rw].std(dim=[1, 2]).sum().item()
+    return sample[:, ry:ry + rh, rx:rx + rw].std(dim=[1, 2]).mean().item()
 
 
-def _build_canvas_quadtree(canvas, min_cell=4, max_iterations=None):
+def _build_canvas_quadtree(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_THRESHOLD):
     """
-    Run a single greedy quadtree over the whole canvas.
+    Run a threshold-based quadtree over the whole canvas.
 
-    Always splits the highest-detail region first (max-heap). Flat regions
-    never rise to the top of the heap in the presence of complex regions, so
-    they naturally stay as large cells — no threshold required.
+    A cell splits only when it holds sufficient information — detail (mean
+    per-channel std) above split_threshold — and stops at min_cell. There is
+    no subdivision budget and no competition between regions: whether a cell
+    splits depends only on its own content, so the resulting leaf structure
+    is an absolute measure. A uniformly soft canvas genuinely produces few,
+    large leaves everywhere (the earlier greedy-heap design force-spent a
+    budget on "the least soft of the soft", manufacturing density on images
+    that had no detail at all).
 
-    Stopping conditions:
-      - max_iterations budget exhausted (auto-scaled from canvas size if None)
-      - detail <= _QUIET_SCORE_EPSILON (genuinely flat cell)
-      - cell smaller than min_cell in either dimension
+    Recursion is bounded by min_cell, so no iteration cap is needed.
 
     Returns: list of (ry, rx, rh, rw) leaf cells covering the full canvas.
     """
-    # The greedy loop calls _region_detail (.std().item()) hundreds of times;
-    # on a GPU tensor each .item() is a device sync, so score on CPU instead.
+    # _region_detail (.std().item()) runs once per visited cell; on a GPU
+    # tensor each .item() is a device sync, so score on CPU instead.
     sample = canvas[0].detach().cpu()  # [C, H, W]
     _, H, W = sample.shape
 
-    if max_iterations is None:
-        max_iterations = (H // min_cell) * (W // min_cell) // 8
-
-    root_detail = _region_detail(sample, 0, 0, H, W)
-    heap = [(-root_detail, 0, 0, H, W)]
+    stack = [(0, 0, H, W)]
     leaves = []
 
-    for _ in range(max_iterations):
-        if not heap:
-            break
-
-        neg_d, ry, rx, rh, rw = heapq.heappop(heap)
-        d = -neg_d
-
-        if d <= _QUIET_SCORE_EPSILON:
-            leaves.append((ry, rx, rh, rw))
-            continue
+    while stack:
+        ry, rx, rh, rw = stack.pop()
 
         half_h = rh // 2
         half_w = rw // 2
         can_h = half_h >= min_cell
         can_w = half_w >= min_cell
 
-        if not can_h and not can_w:
+        if (not can_h and not can_w) or \
+                _region_detail(sample, ry, rx, rh, rw) <= split_threshold:
             leaves.append((ry, rx, rh, rw))
             continue
 
@@ -311,31 +276,29 @@ def _build_canvas_quadtree(canvas, min_cell=4, max_iterations=None):
                 (ry, rx + half_w, rh,  rw - half_w),
             ]
 
-        for cy, cx, ch, cw in children:
-            heapq.heappush(heap, (-_region_detail(sample, cy, cx, ch, cw), cy, cx, ch, cw))
-
-    # Budget exhausted — flush remaining heap entries as leaves
-    while heap:
-        _, ry, rx, rh, rw = heapq.heappop(heap)
-        leaves.append((ry, rx, rh, rw))
+        stack.extend(children)
 
     return leaves
 
 
-def _tile_quadtree_density(canvas, tile_coords, min_cell=4):
+def _tile_quadtree_density(canvas, tile_coords, min_cell=4,
+                           split_threshold=_DEFAULT_SPLIT_THRESHOLD):
     """
     Score tiles by quadtree leaf density from a single global canvas quadtree.
 
-    Runs one greedy quadtree over the whole canvas (see _build_canvas_quadtree),
-    then scores each tile by counting leaves whose center falls within it:
+    Runs one threshold-based quadtree over the whole canvas (see
+    _build_canvas_quadtree), then scores each tile by counting leaves whose
+    center falls within it, normalized to an absolute [0, 1] scale:
 
-        score = leaves_with_center_in_tile / tile_area
+        score = leaves_with_center_in_tile * min_cell^2 / tile_area
 
-    Flat tiles score near zero (their regions stay as large leaves whose centers
-    rarely land inside a particular queried tile). Complex tiles score higher
-    (many small leaves concentrated in detailed regions).
+    min_cell^2 / tile_area is the reciprocal of the maximum possible leaf
+    count for the tile (every leaf at the min_cell floor), so 1.0 means
+    "subdivided to the limit everywhere" and 0.0 means "no detail anywhere".
+    The score is comparable across images and batches — a soft tile scores
+    low regardless of what else is in the image.
     """
-    leaves = _build_canvas_quadtree(canvas, min_cell)
+    leaves = _build_canvas_quadtree(canvas, min_cell, split_threshold)
     result = []
     for (y1, x1, y2, x2) in tile_coords:
         th = y2 - y1
@@ -347,11 +310,11 @@ def _tile_quadtree_density(canvas, tile_coords, min_cell=4):
             1 for (ry, rx, rh, rw) in leaves
             if y1 <= ry + rh // 2 < y2 and x1 <= rx + rw // 2 < x2
         )
-        result.append(count / (th * tw))
+        result.append(count * (min_cell * min_cell) / (th * tw))
     return result
 
 
-def _build_quadtree_map(canvas, min_cell=4):
+def _build_quadtree_map(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_THRESHOLD):
     """
     Build a pixel-space visualization of the global canvas quadtree.
 
@@ -364,7 +327,7 @@ def _build_quadtree_map(canvas, min_cell=4):
     _, H, W = sample.shape
     img = torch.zeros(1, H * 8, W * 8, 3)
 
-    for (ry, rx, rh, rw) in _build_canvas_quadtree(canvas, min_cell):
+    for (ry, rx, rh, rw) in _build_canvas_quadtree(canvas, min_cell, split_threshold):
         py0, py1 = ry * 8, (ry + rh) * 8
         px0, px1 = rx * 8, (rx + rw) * 8
         img[0, py0:min(py0 + 2, py1), px0:px1, :] = 1.0
@@ -393,7 +356,7 @@ class LLMAdaptiveTileDetailer:
                 "cfg": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "step": 0.1}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "scoring_method": (["otsu_threshold", "gradient_magnitude", "quadtree_density"], {"default": "otsu_threshold"}),
+                "scoring_method": (["otsu_threshold", "quadtree_density"], {"default": "otsu_threshold"}),
                 "denoise_min": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "denoise_max": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "curve": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 5.0, "step": 0.01}),
@@ -405,6 +368,10 @@ class LLMAdaptiveTileDetailer:
                                       "tooltip": "Eta for lowest-denoise tiles. 0 = deterministic ODE. Eta-compatible samplers: euler_ancestral, dpmpp_sde, dpmpp_2s_ancestral, dpmpp_2m_sde, dpmpp_3m_sde, rk_beta."}),
                 "eta_max": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
                                       "tooltip": "Eta for highest-denoise tiles. Scales linearly from eta_min (at denoise_min) to eta_max (at denoise_max)."}),
+            },
+            "optional": {
+                "split_threshold": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 5.0, "step": 0.01,
+                                              "tooltip": "quadtree_density only: a cell subdivides while its mean per-channel latent std exceeds this. Lower = more sensitive (more tiles count as detailed). VAE latents are roughly unit-variance, so the default suits most models."}),
             }
         }
 
@@ -416,7 +383,8 @@ class LLMAdaptiveTileDetailer:
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler,
                scoring_method, denoise_min, denoise_max, curve,
-               tile_size, overlap, edge_mode, noise_type, eta_min, eta_max):
+               tile_size, overlap, edge_mode, noise_type, eta_min, eta_max,
+               split_threshold=_DEFAULT_SPLIT_THRESHOLD):
 
         canvas = upscaled_latent["samples"].clone()
         # Video-latent-format models (e.g. Krea2 with the Wan VAE) hand us a 5D
@@ -468,20 +436,15 @@ class LLMAdaptiveTileDetailer:
         if scoring_method == "otsu_threshold":
             scores = _tile_otsu_scores(canvas, tile_coords)
             scoring_map_img = _build_otsu_map(canvas)
-        elif scoring_method == "gradient_magnitude":
-            scores = _tile_complexity(canvas, tile_coords)
-            scoring_map_img = None
         elif scoring_method == "quadtree_density":
-            scores = _tile_quadtree_density(canvas, tile_coords)
-            scoring_map_img = _build_quadtree_map(canvas)
+            scores = _tile_quadtree_density(canvas, tile_coords, split_threshold=split_threshold)
+            scoring_map_img = _build_quadtree_map(canvas, split_threshold=split_threshold)
         else:
             raise ValueError(f"Unknown scoring_method: {scoring_method!r}")
 
         scores = _smooth_scores(scores, rows + 1, cols + 1)
         td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
         denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows, tile_l)
-        if scoring_map_img is None:
-            scoring_map_img = denoise_map_img
 
         # --- Pass 2: sample each tile with its computed denoise and scaled eta ---
         pbar = ProgressBar(len(tile_coords))

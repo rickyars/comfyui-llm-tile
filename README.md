@@ -186,7 +186,9 @@ The tile grid uses whole user-sized tiles centered on the image. If the image si
 
 ### Adaptive Tiled Image Detailer
 
-Measures each tile before sampling it, then scales the denoise strength accordingly. Three scoring methods are available: `otsu_threshold`, `gradient_magnitude`, and `quadtree_density`.
+Measures each tile before sampling it, then scales the denoise strength accordingly. Two scoring methods are available: `otsu_threshold` and `quadtree_density`.
+
+Scores are **absolute**: a tile's denoise depends only on its own content, never on the other tiles in the image. This makes the node safe for batch processing with a single `denoise_min`/`denoise_max`: a uniformly soft image sits near `denoise_min` everywhere instead of having its least-soft tile promoted to `denoise_max`. (Earlier versions min-max normalized scores within each image, which made every image stretch to `denoise_max` somewhere; the `gradient_magnitude` method only made sense under that normalization and was removed with it.)
 
 Outputs three things: the refined latent, a denoise map, and a scoring map. The denoise map is a tile heatmap using the viridis colormap (dark purple = low denoise, teal = mid, yellow = high denoise). The scoring map is a debug visualization specific to the active scoring method.
 
@@ -194,7 +196,7 @@ Outputs three things: the refined latent, a denoise map, and a scoring map. The 
 
 **Pass 1** computes the centered whole-tile grid once. The same tile coordinates are used for scoring, the denoise heatmap, and sampling.
 
-Tile scores are normalized to [0, 1] within the image (lowest-scoring tile = 0, highest-scoring tile = 1), mapped through the `curve` exponent, and scaled to [denoise_min, denoise_max].
+Tile scores land directly on an absolute [0, 1] scale (0 = no detail, 1 = maximal detail), are mapped through the `curve` exponent, and scaled to [denoise_min, denoise_max].
 
 After scoring, each tile's raw score is blended with the average of its 4-connected neighbors (70% own, 30% neighbor average). This prevents abrupt denoise jumps between adjacent tiles while preserving the coarse adaptive distribution.
 
@@ -202,19 +204,18 @@ After scoring, each tile's raw score is blended with the average of its 4-connec
 
 #### Scoring methods
 
-**`otsu_threshold`** — Averages latent channels into a single intensity map, normalizes to [0, 1], computes a global Otsu threshold, and scores each tile by its fraction of bright-class (above-threshold) pixels. The scoring map is a black/white image where white = above threshold. Works well when the image has a clear bimodal intensity distribution.
+**`otsu_threshold`** — Averages latent channels into a single intensity map, normalizes to [0, 1], computes a global Otsu threshold, and scores each tile by its fraction of bright-class (above-threshold) pixels — an absolute coverage fraction. The scoring map is a black/white image where white = above threshold. Works well when the image has a clear bimodal intensity distribution. Note it measures *subject coverage*, not sharpness: a soft image with a bright subject still scores high.
 
-**`gradient_magnitude`** — Computes the sum of absolute latent gradients per tile. Tiles with sharp edges and high-frequency content score high; flat, blurry, or uniform tiles score near zero. The scoring map is a per-pixel gradient magnitude image. Good for images where visual sharpness or edge density determines where detail is needed.
-
-**`quadtree_density`** — Runs a single greedy quadtree over the entire canvas using a max-heap, then scores each tile by how many quadtree leaf cells have their center within it. Regions with high detail subdivide into many small leaves; flat regions stay as large leaves naturally, with no threshold required. The scoring map shows the quadtree cell outlines (white on black) — large cells = flat, small cells = complex. Budget is auto-scaled from canvas dimensions so no parameters are exposed.
+**`quadtree_density`** — Runs a threshold-based quadtree over the entire canvas: a cell subdivides only while its detail (mean per-channel latent std) exceeds `split_threshold`, down to a 4-latent-pixel floor. Each tile is scored by its leaf density, normalized so 1.0 = subdivided to the floor everywhere and 0.0 = no detail anywhere. A soft image genuinely produces large leaves everywhere and low scores in every tile — the recommended method for batch processing. The scoring map shows the quadtree cell outlines (white on black) — large cells = flat, small cells = complex.
 
 #### Parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `scoring_method` | `otsu_threshold` | `otsu_threshold`, `gradient_magnitude`, or `quadtree_density` |
-| `denoise_min` | 0.05 | Denoise applied to the lowest-scoring tile. Near zero freezes it. |
-| `denoise_max` | 0.35 | Denoise applied to the highest-scoring tile. |
+| `scoring_method` | `otsu_threshold` | `otsu_threshold` or `quadtree_density` |
+| `denoise_min` | 0.05 | Denoise applied to a zero-score tile. Near zero freezes it. |
+| `denoise_max` | 0.35 | Denoise applied to a full-score (1.0) tile. Soft images may never reach it — that's the point. |
+| `split_threshold` | 0.35 | Optional, `quadtree_density` only. A cell subdivides while its mean per-channel latent std exceeds this. Lower = more of the image counts as detailed. VAE latents are roughly unit-variance, so the default is a reasonable starting point across models. |
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
 | `tile_size` | 1024 | Tile size in pixels |
 | `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended using a smoothstep curve to hide seams. |
@@ -225,7 +226,7 @@ After scoring, each tile's raw score is blended with the average of its 4-connec
 
 #### How `curve` works
 
-After normalizing tile scores to [0, 1], the node raises the normalized value to the power of `curve` before mapping to the denoise range:
+The node raises each tile's absolute [0, 1] score to the power of `curve` before mapping to the denoise range:
 
 ```
 t_curved = t ^ curve

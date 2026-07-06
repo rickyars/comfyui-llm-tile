@@ -1,32 +1,7 @@
 import torch
 import pytest
-from node_detailer_adaptive import _tile_complexity, _otsu_threshold, _tile_otsu_scores, _build_otsu_map
+from node_detailer_adaptive import _otsu_threshold, _tile_otsu_scores, _build_otsu_map
 from node_detailer_adaptive import _build_canvas_quadtree
-
-
-def test_tile_complexity_flat_returns_zero():
-    canvas = torch.zeros(1, 4, 32, 32)
-    coords = [(0, 0, 16, 16)]
-    result = _tile_complexity(canvas, coords)
-    assert result == [pytest.approx(0.0)]
-
-
-def test_tile_complexity_nonzero_for_random():
-    torch.manual_seed(42)
-    canvas = torch.randn(1, 4, 32, 32)
-    coords = [(0, 0, 16, 16)]
-    result = _tile_complexity(canvas, coords)
-    assert result[0] > 0.0
-
-
-def test_tile_complexity_flat_less_than_varied():
-    # Top-left quadrant is flat (zeros); bottom-right has a ramp with edges
-    canvas = torch.zeros(1, 4, 32, 32)
-    ramp = torch.arange(16, dtype=torch.float32).view(1, 1, 4, 4).expand(1, 4, 4, 4).clone()
-    canvas[:, :, 16:20, 16:20] = ramp
-    coords = [(0, 0, 16, 16), (16, 16, 32, 32)]
-    result = _tile_complexity(canvas, coords)
-    assert result[0] < result[1]
 
 
 def test_otsu_threshold_splits_two_value_distribution():
@@ -97,9 +72,23 @@ def test_curve_gt_one_biases_midpoint_toward_min():
     assert curved[1][1] < linear[1][1]
 
 
-def test_single_nonzero_score_returns_denoise_max():
-    result = _scores_to_denoise([0.7], curve=1.5, denoise_min=0.05, denoise_max=0.35)
-    assert result[0][1] == pytest.approx(0.35)
+def test_scores_map_absolutely_not_relatively():
+    # The image's own max must NOT be stretched to denoise_max: a 0.7-score
+    # tile gets the same denoise whether it is alone or beside a 1.0 tile.
+    alone = _scores_to_denoise([0.7], curve=1.5, denoise_min=0.05, denoise_max=0.35)
+    beside_sharp = _scores_to_denoise([0.7, 1.0], curve=1.5, denoise_min=0.05, denoise_max=0.35)
+    expected = 0.05 + (0.7 ** 1.5) * 0.30
+    assert alone[0][1] == pytest.approx(expected)
+    assert beside_sharp[0][1] == pytest.approx(expected)
+    assert alone[0][1] < 0.35  # relative normalization would have hit the max
+
+
+def test_scores_clamp_outside_unit_range():
+    result = _scores_to_denoise([-0.5, 1.5], curve=1.0, denoise_min=0.1, denoise_max=0.4)
+    assert result[0][0] == pytest.approx(0.0)
+    assert result[0][1] == pytest.approx(0.1)
+    assert result[1][0] == pytest.approx(1.0)
+    assert result[1][1] == pytest.approx(0.4)
 
 
 from node_detailer_adaptive import _t_to_rgb, _build_denoise_map
@@ -202,24 +191,16 @@ def test_build_denoise_map_edge_tiles_symmetric_after_pad_crop():
 from node_detailer_adaptive import LLMAdaptiveTileDetailer
 
 
-def test_scoring_method_enum_includes_gradient_magnitude():
+def test_scoring_method_enum_excludes_gradient_magnitude():
+    # gradient_magnitude produced scores in arbitrary units that only meant
+    # anything under per-image min-max normalization; removed with it.
     methods = LLMAdaptiveTileDetailer.INPUT_TYPES()["required"]["scoring_method"][0]
-    assert "gradient_magnitude" in methods
+    assert "gradient_magnitude" not in methods
 
 
 def test_return_names_uses_scoring_map_not_otsu_map():
     assert "scoring_map" in LLMAdaptiveTileDetailer.RETURN_NAMES
     assert "otsu_map" not in LLMAdaptiveTileDetailer.RETURN_NAMES
-
-
-def test_gradient_magnitude_scores_complex_tile_higher_than_flat():
-    canvas_flat = torch.zeros(1, 4, 32, 32)
-    canvas_complex = torch.zeros(1, 4, 32, 32)
-    canvas_complex[:, :, 8:24, 8:24] = torch.arange(16, dtype=torch.float32).view(1, 1, 4, 4).expand(1, 4, 4, 4).repeat(1, 1, 4, 4)
-    coords = [(0, 0, 16, 16)]
-    flat_score = _tile_complexity(canvas_flat, coords)
-    complex_score = _tile_complexity(canvas_complex, coords)
-    assert flat_score[0] < complex_score[0]
 
 
 from node_detailer_adaptive import _tile_quadtree_density
@@ -252,6 +233,45 @@ def test_tile_quadtree_density_ranks_tiles_correctly():
     coords = [(0, 0, 16, 16), (16, 16, 32, 32)]
     result = _tile_quadtree_density(canvas, coords)
     assert result[0] < result[1]
+
+
+def test_tile_quadtree_density_is_bounded_unit_interval():
+    # Fully subdivided tile (raw noise splits to the min_cell floor) → exactly 1.0.
+    torch.manual_seed(7)
+    canvas = torch.randn(1, 4, 32, 32)
+    coords = [(0, 0, 32, 32)]
+    result = _tile_quadtree_density(canvas, coords)
+    assert result[0] == pytest.approx(1.0)
+
+
+def test_tile_quadtree_density_uniformly_soft_canvas_scores_low_everywhere():
+    # The batch-processing regression: a canvas that is soft *everywhere* must
+    # score low in every tile, not have its least-soft tile promoted to 1.0.
+    # Low-amplitude smooth ramp: std well below split_threshold in every cell.
+    ramp = torch.linspace(0.0, 0.2, 32).view(1, 1, 1, 32).expand(1, 4, 32, 32)
+    coords = [(0, 0, 16, 16), (0, 16, 16, 32), (16, 0, 32, 16), (16, 16, 32, 32)]
+    result = _tile_quadtree_density(ramp.contiguous(), coords)
+    for score in result:
+        assert score < 0.1
+
+
+def test_tile_quadtree_density_score_is_context_independent():
+    # A tile's score must not depend on what else is in the image: the same
+    # soft quadrant scores low both alone and next to raw noise. (Under the
+    # old min-max normalization the soft tile mapped to t=0 in the mixed
+    # image but t could reach 1.0 when the whole image was soft.) A single
+    # leaf-center of granularity (min_cell^2/tile_area = 0.0625 here) is
+    # allowed: neighbouring detail changes the tree partition, not the score.
+    torch.manual_seed(3)
+    soft_alone = torch.zeros(1, 4, 32, 32)
+    soft_beside_noise = torch.zeros(1, 4, 32, 32)
+    soft_beside_noise[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
+    coords = [(0, 0, 16, 16)]
+    score_alone = _tile_quadtree_density(soft_alone, coords)[0]
+    score_beside = _tile_quadtree_density(soft_beside_noise, coords)[0]
+    assert score_alone < 0.1
+    assert score_beside < 0.1
+    assert abs(score_alone - score_beside) <= 0.0625 + 1e-6
 
 
 def test_scoring_method_enum_includes_quadtree_density():
@@ -287,7 +307,7 @@ def test_build_canvas_quadtree_leaves_partition_canvas():
 
 def test_build_canvas_quadtree_complex_region_gets_more_leaves():
     # Bottom-right quadrant is complex; top-left is flat.
-    # Global heap spends budget on the complex region — it should have more leaves.
+    # Only cells whose detail exceeds split_threshold subdivide.
     torch.manual_seed(0)
     canvas = torch.zeros(1, 4, 32, 32)
     canvas[:, :, 16:32, 16:32] = torch.randn(1, 4, 16, 16)
@@ -338,7 +358,7 @@ def test_adaptive_detail_uses_sample_custom_not_sample():
         positive=[], negative=[],
         seed=0, steps=20, cfg=7.0,
         sampler_name="euler", scheduler="normal",
-        scoring_method="gradient_magnitude",
+        scoring_method="quadtree_density",
         denoise_min=0.05, denoise_max=0.35,
         curve=1.5, tile_size=256, overlap=0,
         edge_mode="center",
@@ -375,7 +395,7 @@ def test_adaptive_detail_eta_varies_across_tiles():
             positive=[], negative=[],
             seed=0, steps=20, cfg=7.0,
             sampler_name="euler_ancestral", scheduler="normal",
-            scoring_method="gradient_magnitude",
+            scoring_method="quadtree_density",
             denoise_min=0.05, denoise_max=0.35,
             curve=1.0, tile_size=128, overlap=0,
             edge_mode="center",
@@ -405,7 +425,7 @@ def _adaptive_common():
     return dict(
         model=_make_model_mock(), positive=[], negative=[],
         seed=0, steps=20, cfg=7.0, sampler_name="euler", scheduler="normal",
-        scoring_method="gradient_magnitude", denoise_min=0.05, denoise_max=0.35,
+        scoring_method="quadtree_density", denoise_min=0.05, denoise_max=0.35,
         curve=1.5, tile_size=128, overlap=0, noise_type="gaussian",
         eta_min=0.0, eta_max=1.0,
     )
