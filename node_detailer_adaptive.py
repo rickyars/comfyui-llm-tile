@@ -7,15 +7,15 @@ from comfy.utils import ProgressBar
 
 if __package__:
     from .utils import (
-        feather_blend_latent, _compute_center_grid, _compute_tile_coords,
+        feather_blend_latent, compute_tile_coords,
         check_eta_support, prepare_noise_typed, build_tile_sampler,
-        NOISE_GENERATOR_NAMES_SIMPLE, pad_latent_to_grid,
+        NOISE_GENERATOR_NAMES_SIMPLE,
     )
 else:
     from utils import (
-        feather_blend_latent, _compute_center_grid, _compute_tile_coords,
+        feather_blend_latent, compute_tile_coords,
         check_eta_support, prepare_noise_typed, build_tile_sampler,
-        NOISE_GENERATOR_NAMES_SIMPLE, pad_latent_to_grid,
+        NOISE_GENERATOR_NAMES_SIMPLE,
     )
 
 
@@ -171,41 +171,46 @@ def _t_to_rgb(t):
     return r0 + f * (r1 - r0), g0 + f * (g1 - g0), b0 + f * (b1 - b0)
 
 
-def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, cols, rows, tile_l):
+def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, n_cols, n_rows):
     """
     tile_coords: list of (y1, x1, y2, x2) in latent space — exact sampler positions.
     t_values:    list of pre-curve normalized score [0,1], one per tile
     canvas_h, canvas_w: latent-space dimensions (pixel dims = these x 8)
-    cols, rows: strides in each axis; grid is (cols+1) x (rows+1) tiles
-    tile_l: tile edge length in latent units — used to recover the tile anchor.
+    n_cols, n_rows: grid shape; tile_coords[r * n_cols + c] is row r, column c.
     Returns: IMAGE tensor [1, canvas_h*8, canvas_w*8, 3]
 
-    Paints each tile on its non-overlapping anchor stride (``[x2 - tile_l, x2)``)
-    rather than its full sampled span (``[x1, x2)``). The sampled span extends
-    ``overlap_l`` pixels leftward/upward into the previous tile, so painting it
-    with a row-major hard overwrite lets the right/lower tile win every shared
-    overlap zone — which biases the whole map leftward and, in pad/crop modes,
-    collapses the near-edge sliver while inflating the far-edge one. Anchor
-    strides tile the canvas exactly (no overlap, no gaps), so the heatmap
-    reflects the true centered grid.
+    Paints each tile's ownership cell rather than its full sampled span. Tiles
+    overlap (including the clamped last tile in each axis, which can overlap
+    its neighbor by more than the configured overlap), so painting full spans
+    with a row-major overwrite would bias the map toward later tiles. The
+    ownership boundary between two adjacent tiles is the midpoint of their
+    shared overlap zone; the cells partition the canvas exactly.
     """
     H_px, W_px = canvas_h * 8, canvas_w * 8
     img = torch.zeros(1, H_px, W_px, 3)
 
-    for (y1, x1, y2, x2), t in zip(tile_coords, t_values):
-        px0 = (x2 - tile_l) * 8
-        px1 = x2 * 8
-        py0 = (y2 - tile_l) * 8
-        py1 = y2 * 8
-        r, g, b = _t_to_rgb(t)
-        img[0, py0:py1, px0:px1, 0] = r
-        img[0, py0:py1, px0:px1, 1] = g
-        img[0, py0:py1, px0:px1, 2] = b
+    x_starts = sorted({x1 for (_, x1, _, _) in tile_coords})
+    y_starts = sorted({y1 for (y1, _, _, _) in tile_coords})
+    tw = tile_coords[0][3] - tile_coords[0][1]
+    th = tile_coords[0][2] - tile_coords[0][0]
 
-        img[0, py0:min(py0 + 2, py1), px0:px1, :] = 1.0
-        img[0, max(py1 - 2, py0):py1, px0:px1, :] = 1.0
-        img[0, py0:py1, px0:min(px0 + 2, px1), :] = 1.0
-        img[0, py0:py1, max(px1 - 2, px0):px1, :] = 1.0
+    def _bounds(starts, length, limit):
+        cuts = [0]
+        for prev, cur in zip(starts, starts[1:]):
+            cuts.append((cur + prev + length) // 2)
+        cuts.append(limit)
+        return cuts
+
+    xb = _bounds(x_starts, tw, canvas_w)
+    yb = _bounds(y_starts, th, canvas_h)
+
+    for idx, t in enumerate(t_values):
+        r, c = divmod(idx, n_cols)
+        red, green, blue = _t_to_rgb(t)
+        cell = img[0, yb[r] * 8:yb[r + 1] * 8, xb[c] * 8:xb[c + 1] * 8]
+        cell[:, :, 0] = red
+        cell[:, :, 1] = green
+        cell[:, :, 2] = blue
 
     return img
 
@@ -428,7 +433,6 @@ class LLMAdaptiveTileDetailer:
                 "curve": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 5.0, "step": 0.01}),
                 "tile_size": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 8}),
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 512, "step": 8}),
-                "edge_mode": (["center", "crop", "pad"], {"default": "center", "tooltip": "center: diffuse centered grid, leave edge margins as the original upscale (original size). crop: crop output to the detailed region. pad: edge-replicate to a full tile grid, diffuse everything, crop back to original size."}),
                 "noise_type": (NOISE_GENERATOR_NAMES_SIMPLE, {"default": "gaussian"}),
                 "eta_min": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01,
                                       "tooltip": "Eta for lowest-denoise tiles. 0 = deterministic ODE. Eta-compatible samplers: euler_ancestral, dpmpp_sde, dpmpp_2s_ancestral, dpmpp_2m_sde, dpmpp_3m_sde, rk_beta."}),
@@ -449,7 +453,7 @@ class LLMAdaptiveTileDetailer:
     def detail(self, model, upscaled_latent, positive, negative,
                seed, steps, cfg, sampler_name, scheduler,
                scoring_method, denoise_min, denoise_max, curve,
-               tile_size, overlap, edge_mode, noise_type, eta_min, eta_max,
+               tile_size, overlap, noise_type, eta_min, eta_max,
                split_threshold=_DEFAULT_SPLIT_THRESHOLD):
 
         canvas = upscaled_latent["samples"].clone()
@@ -463,25 +467,14 @@ class LLMAdaptiveTileDetailer:
                     "LLMAdaptiveTileDetailer only supports single-frame latents, "
                     f"got temporal dim T={canvas.shape[2]}.")
             canvas = canvas[:, :, 0]
-        _, _, H0, W0 = canvas.shape
+        _, _, H, W = canvas.shape
 
         tile_l = tile_size // 8
-        pad_top = pad_left = 0
-        if edge_mode == "pad":
-            canvas, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l)
-        _, _, H, W = canvas.shape
         overlap_l = overlap // 8
         if overlap_l >= tile_l:
             overlap_l = tile_l // 2
             print(f"[LLMAdaptiveTileDetailer] Warning: overlap clamped to "
                   f"{overlap_l * 8}px (overlap must be < tile_size)")
-
-        cols, rows = _compute_center_grid(W, H, tile_l, overlap_l)
-        stride = tile_l - overlap_l
-
-        print(f"[LLMAdaptiveTileDetailer] Latent {W}x{H} | "
-              f"tile_l={tile_l} overlap_l={overlap_l} stride={stride} | "
-              f"grid cols={cols} rows={rows} ({(rows+1)*(cols+1)} tiles)")
 
         model_sampling = model.get_model_object("model_sampling")
         sigma_min = float(model_sampling.sigma_min)
@@ -492,10 +485,13 @@ class LLMAdaptiveTileDetailer:
                   f"eta; eta_min/eta_max will be ignored. Use an ancestral sampler or 'rk_beta'.")
         drange = denoise_max - denoise_min
 
-        # --- Pass 1: collect valid tile coords and measure complexity ---
-        tile_coords = _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l)
+        # --- Pass 1: build the full-coverage grid and measure complexity ---
+        tile_coords, n_cols, n_rows = compute_tile_coords(W, H, tile_l, overlap_l)
         x_starts = sorted({x1 for _, x1, _, _ in tile_coords})
         y_starts = sorted({y1 for y1, _, _, _ in tile_coords})
+        print(f"[LLMAdaptiveTileDetailer] Latent {W}x{H} | "
+              f"tile_l={tile_l} overlap_l={overlap_l} | "
+              f"grid {n_cols}x{n_rows} ({len(tile_coords)} tiles)")
         print(f"[LLMAdaptiveTileDetailer] grid starts px "
               f"x={[x * 8 for x in x_starts]} y={[y * 8 for y in y_starts]}")
 
@@ -511,13 +507,12 @@ class LLMAdaptiveTileDetailer:
         else:
             raise ValueError(f"Unknown scoring_method: {scoring_method!r}")
 
-        scores = _smooth_scores(scores, rows + 1, cols + 1)
+        scores = _smooth_scores(scores, n_rows, n_cols)
         td_pairs = _scores_to_denoise(scores, curve, denoise_min, denoise_max)
-        denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, cols, rows, tile_l)
+        denoise_map_img = _build_denoise_map(tile_coords, [t for t, _ in td_pairs], H, W, n_cols, n_rows)
 
         # --- Pass 2: sample each tile with its computed denoise and scaled eta ---
         pbar = ProgressBar(len(tile_coords))
-        n_cols = cols + 1
         for tile_idx, (y1, x1, y2, x2) in enumerate(tile_coords):
             r = tile_idx // n_cols
             c = tile_idx % n_cols
@@ -575,19 +570,6 @@ class LLMAdaptiveTileDetailer:
             pbar.update(1)
 
         comfy.model_management.soft_empty_cache()
-
-        if edge_mode == "crop":
-            y1_c, x1_c = tile_coords[0][0], tile_coords[0][1]
-            y2_c, x2_c = tile_coords[-1][2], tile_coords[cols][3]
-            canvas = canvas[:, :, y1_c:y2_c, x1_c:x2_c]
-            denoise_map_img = denoise_map_img[:, y1_c * 8:y2_c * 8, x1_c * 8:x2_c * 8, :]
-            scoring_map_img = scoring_map_img[:, y1_c * 8:y2_c * 8, x1_c * 8:x2_c * 8, :]
-        elif edge_mode == "pad":
-            canvas = canvas[:, :, pad_top:pad_top + H0, pad_left:pad_left + W0]
-            denoise_map_img = denoise_map_img[
-                :, pad_top * 8:(pad_top + H0) * 8, pad_left * 8:(pad_left + W0) * 8, :]
-            scoring_map_img = scoring_map_img[
-                :, pad_top * 8:(pad_top + H0) * 8, pad_left * 8:(pad_left + W0) * 8, :]
 
         if temporal_latent:
             canvas = canvas.unsqueeze(2)

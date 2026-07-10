@@ -116,76 +116,53 @@ def test_t_to_rgb_half_is_teal():
 
 
 def test_build_denoise_map_shape():
-    # Single tile: 1×1 grid (cols=0, rows=0)
+    # Single tile: 1×1 grid
     coords = [(0, 0, 4, 4)]
     t_values = [0.5]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0, tile_l=4)
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, n_cols=1, n_rows=1)
     assert result.shape == (1, 32, 32, 3)
 
 
 def test_build_denoise_map_dark_for_t_zero():
     coords = [(0, 0, 4, 4)]
     t_values = [0.0]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0, tile_l=4)
-    # Check interior pixel (not border — _build_denoise_map draws white borders at tile edges)
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, n_cols=1, n_rows=1)
     assert result[0, 16, 16].max().item() < 0.50  # viridis(0) is dark purple
 
 
 def test_build_denoise_map_bright_for_t_one():
     coords = [(0, 0, 4, 4)]
     t_values = [1.0]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=0, tile_l=4)
+    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, n_cols=1, n_rows=1)
     assert result[0, 0, 0, 0].item() > 0.90  # viridis(1) yellow: high R
     assert result[0, 0, 0, 1].item() > 0.80  # high G
 
 
-def test_build_denoise_map_matches_sampler_grid():
-    # 2-row, 1-column grid (cols=0, rows=1), tile_l=4.
-    # Tile positions: r=0 anchor block [0,4), r=1 anchor block [2,6) (latent).
-    # Heatmap paints each tile on its anchor stride [y2-tile_l, y2); later tiles
-    # still overwrite the shared band, matching row-major sampling order.
+def test_build_denoise_map_splits_overlap_at_midpoint():
+    # Two overlapping tiles in one column: [0,4) and [2,6) overlap on [2,4).
+    # Ownership boundary is the overlap midpoint (3), so the map paints
+    # [0,3) with the first tile's colour and [3,6) with the second's.
     coords = [(0, 0, 4, 4), (2, 0, 6, 4)]  # (y1, x1, y2, x2) in latent
     t_values = [0.0, 1.0]
-    result = _build_denoise_map(coords, t_values, canvas_h=4, canvas_w=4, cols=0, rows=1, tile_l=4)
-    top_max = result[0, 8, 16].max().item()      # top-only region
-    overlap_r = result[0, 24, 16, 0].item()      # second tile owns overlap
-    assert top_max < 0.50    # dark purple
-    assert overlap_r > 0.90
+    result = _build_denoise_map(coords, t_values, canvas_h=6, canvas_w=4, n_cols=1, n_rows=2)
+    assert result[0, 8, 16].max().item() < 0.50   # y=1: first tile, dark purple
+    assert result[0, 20, 16, 0].item() < 0.50     # y=2.5: still first tile's side
+    assert result[0, 26, 16, 0].item() > 0.90     # y=3.25: second tile, yellow
+    assert result[0, 40, 16, 0].item() > 0.90     # y=5: second tile
 
 
-def test_build_denoise_map_edge_tiles_symmetric_after_pad_crop():
-    # Regression: pad-mode map looked "not centered". A centered grid over an
-    # odd width leaves near/far margins that pad turns into symmetric edge
-    # tiles; the map must render them with equal width, not collapse the near
-    # sliver and inflate the far one. Overlap extends each tile leftward, so
-    # painting the full [x1, x2) span with a row-major overwrite is the bug.
-    from utils.image_utils import (
-        pad_latent_to_grid, _compute_center_grid, _compute_tile_coords)
-    import torch
-    tile_l, overlap_l = 128, 8
-    canvas = torch.zeros(1, 4, 1024, 409)
-    padded, (pad_top, pad_left) = pad_latent_to_grid(canvas, tile_l)
-    _, _, H, W = padded.shape
-    cols, rows = _compute_center_grid(W, H, tile_l, overlap_l)
-    coords = _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l)
-    n_cols = cols + 1
-    # give each column a distinct t so we can measure per-column ownership
-    t_values = [(idx % n_cols) / (n_cols - 1) for idx in range(len(coords))]
-    result = _build_denoise_map(coords, t_values, H, W, cols, rows, tile_l)
-    # crop back to the original region like edge_mode == "pad"
-    cropped = result[:, :, pad_left * 8:(pad_left + 409) * 8, :]
-    # measure column-run widths on an interior row (avoid white borders by
-    # sampling the row's own colour, not the border rows)
-    row = cropped[0, cropped.shape[1] // 2, :, 0]  # red channel varies with t
-    widths = []
-    start = 0
-    for x in range(1, row.shape[0] + 1):
-        if x == row.shape[0] or abs(row[x] - row[start]) > 1e-4:
-            widths.append(x - start)
-            start = x
-    # first and last runs are the edge slivers; true margins are 96 / 104 px
-    left_sliver, right_sliver = widths[0], widths[-1]
-    assert abs(left_sliver - right_sliver) <= 16, (widths,)
+def test_build_denoise_map_covers_full_canvas_with_clamped_grid():
+    # Non-aligned canvas: the clamped grid's last tiles overlap more than
+    # overlap_l. The ownership cells must still partition the whole canvas —
+    # no unpainted (black) region anywhere.
+    from utils.image_utils import compute_tile_coords
+    coords, n_cols, n_rows = compute_tile_coords(W=44, H=40, tile_l=16, overlap_l=4)
+    t_values = [1.0] * len(coords)  # yellow everywhere
+    result = _build_denoise_map(coords, t_values, canvas_h=40, canvas_w=44,
+                                n_cols=n_cols, n_rows=n_rows)
+    assert result.shape == (1, 320, 352, 3)
+    # every pixel painted (viridis(1.0) has red ~0.99)
+    assert result[0, :, :, 0].min().item() > 0.90
 
 
 from node_detailer_adaptive import LLMAdaptiveTileDetailer
@@ -433,7 +410,6 @@ def test_adaptive_detail_uses_sample_custom_not_sample():
         scoring_method="quadtree_density",
         denoise_min=0.05, denoise_max=0.35,
         curve=1.5, tile_size=256, overlap=0,
-        edge_mode="center",
         noise_type="gaussian", eta_min=0.0, eta_max=1.0,
     )
 
@@ -469,7 +445,6 @@ def test_adaptive_detail_eta_varies_across_tiles():
             scoring_method="quadtree_density",
             denoise_min=0.05, denoise_max=0.35,
             curve=1.0, tile_size=128, overlap=0,
-            edge_mode="center",
             noise_type="gaussian", eta_min=0.0, eta_max=1.0,
         )
     finally:
@@ -484,12 +459,12 @@ def test_adaptive_detail_input_types_include_noise_type_and_eta():
     assert "noise_type" in required
     assert "eta_min" in required
     assert "eta_max" in required
-    assert "edge_mode" in required
+    assert "edge_mode" not in required  # removed: the clamped grid always covers everything
     assert "crop_to_tiles" not in required
 
 
 # ---------------------------------------------------------------------------
-# Task: edge_mode (adaptive)
+# Task: full-coverage clamped grid (no edge modes)
 # ---------------------------------------------------------------------------
 
 def _adaptive_common():
@@ -502,39 +477,37 @@ def _adaptive_common():
     )
 
 
-def test_adaptive_edge_mode_pad_returns_original_shape_and_maps():
+def test_adaptive_output_keeps_original_shape_when_not_aligned():
     node = LLMAdaptiveTileDetailer()
     latent = torch.randn(1, 4, 40, 44)
     canvas, denoise_map, scoring_map = node.detail(
-        upscaled_latent={"samples": latent.clone()}, edge_mode="pad",
+        upscaled_latent={"samples": latent.clone()},
         **_adaptive_common(),
     )
     assert canvas["samples"].shape == latent.shape
-    # maps are pixel-resolution (x8) and must match the original latent size
+    # maps are pixel-resolution (x8) and must match the latent size
     assert denoise_map.shape[1] == 40 * 8 and denoise_map.shape[2] == 44 * 8
     assert scoring_map.shape[1] == 40 * 8 and scoring_map.shape[2] == 44 * 8
 
 
-def test_adaptive_edge_mode_crop_shrinks_canvas_and_maps():
+def test_adaptive_diffuses_entire_canvas_when_not_aligned():
+    # The reason edge_mode was removed: every latent pixel must be sampled,
+    # even when the canvas is not a multiple of tile_size. Stub sampling to
+    # add +100 per tile; with denoise_min > 0 every tile runs, so the whole
+    # output must shift — no untouched margins anywhere.
     node = LLMAdaptiveTileDetailer()
     latent = torch.randn(1, 4, 40, 44)
-    canvas, denoise_map, scoring_map = node.detail(
-        upscaled_latent={"samples": latent.clone()}, edge_mode="crop",
-        **_adaptive_common(),
-    )
-    cs = canvas["samples"].shape
-    # 40x44 latent, tile_l=16 -> centered 2x2 grid crops to exactly 32x32
-    assert cs[2] == 32 and cs[3] == 32
-    assert denoise_map.shape[1] == cs[2] * 8 and denoise_map.shape[2] == cs[3] * 8
-    assert scoring_map.shape[1] == cs[2] * 8 and scoring_map.shape[2] == cs[3] * 8
 
-
-def test_adaptive_edge_mode_center_keeps_original_shape():
-    node = LLMAdaptiveTileDetailer()
-    latent = torch.randn(1, 4, 40, 44)
-    canvas, denoise_map, scoring_map = node.detail(
-        upscaled_latent={"samples": latent.clone()}, edge_mode="center",
-        **_adaptive_common(),
+    original = comfy.sample.sample_custom
+    comfy.sample.sample_custom = MagicMock(
+        side_effect=lambda model, noise, cfg, sampler, sigmas, pos, neg, lat, **kw: lat + 100.0
     )
-    assert canvas["samples"].shape == latent.shape
-    assert denoise_map.shape[1] == 40 * 8 and denoise_map.shape[2] == 44 * 8
+    try:
+        canvas, _, _ = node.detail(
+            upscaled_latent={"samples": latent.clone()},
+            **_adaptive_common(),
+        )
+    finally:
+        comfy.sample.sample_custom = original
+
+    assert torch.all(canvas["samples"] > latent + 50.0)

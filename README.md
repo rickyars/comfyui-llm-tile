@@ -159,28 +159,11 @@ Format:
 
 ---
 
-## Tiled detailers
+## Tiled detailer
 
-Two nodes for refining upscaled images tile by tile. Wire an upscaled latent into either node in place of a KSampler.
+A node for refining upscaled images tile by tile with per-tile denoise strength. Wire an upscaled latent into it in place of a KSampler. (For *uniform* denoise across the canvas, native [TiledDiffusion](https://github.com/shiimizu/ComfyUI-TiledDiffusion) is the better tool — it blends noise predictions every step inside one continuous sampling pass. This node exists for what TiledDiffusion structurally can't do: varying denoise strength by region.)
 
-Both detailers handle 16-channel and video-format latents, so SDXL, Flux, z-image, and Krea2/Wan21 all work. Single-frame video latents (Krea2) are supported; the node squeezes and restores the temporal axis around sampling.
-
----
-
-### Tiled Image Detailer
-
-Applies a single denoise value to every tile. Good starting point; use when the image content is fairly uniform or you want predictable, consistent refinement across the whole canvas.
-
-| Parameter | Default | Notes |
-|---|---|---|
-| `denoise` | 0.25 | Applied uniformly to every tile |
-| `tile_size` | 1024 | Tile size in pixels |
-| `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended in overlap zones using a smoothstep curve to hide seams. |
-| `edge_mode` | `center` | How the grid edges are handled when the image size is not a multiple of `tile_size`. `center`: diffuse the centered grid and leave the outer strips as the original upscale (output keeps original size). `crop`: crop the output down to the detailed region. `pad`: keep the same tile grid as `center` and add one edge tile per uncovered strip — the latent is edge-replicated outward so those edge tiles have data, everything is diffused, then the output is cropped back to original size. Adds up to one extra tile per padded axis. |
-| `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is the standard ComfyUI default. Other types (brownian, uniform, etc.) require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). |
-| `eta` | 1.0 | SDE noise injection per step. 0 = deterministic (ODE path). 1 = standard ancestral. Only applies to ancestral/SDE samplers: `euler_ancestral`, `dpmpp_sde`, `dpmpp_2s_ancestral`, `dpmpp_2m_sde`, `dpmpp_3m_sde`, `rk_beta`. ODE samplers (`euler`, `dpm++_2m`, etc.) ignore this. Values above 1.0 inject more noise than the SDE derivation calls for — adds texture but risks incoherence at low denoise. |
-
-The tile grid uses whole user-sized tiles centered on the image. If the image size is not an exact multiple of `tile_size`, the outside strips are not covered by the centered grid; use `edge_mode` to control them — `center` leaves them untouched, `crop` removes them, and `pad` keeps the same grid and adds an edge tile per strip (edge-replicating the latent so they have data) so they get detailed too, then crops back to the original size.
+The detailer handles 16-channel and video-format latents, so SDXL, Flux, z-image, and Krea2/Wan21 all work. Single-frame video latents (Krea2) are supported; the node squeezes and restores the temporal axis around sampling.
 
 ---
 
@@ -194,7 +177,7 @@ Outputs three things: the refined latent, a denoise map, and a scoring map. The 
 
 #### How it works
 
-**Pass 1** computes the centered whole-tile grid once. The same tile coordinates are used for scoring, the denoise heatmap, and sampling.
+**Pass 1** computes the tile grid once. Tiles advance by `tile_size − overlap`; the last tile in each axis is clamped to end exactly at the canvas edge (overlapping its neighbor by more than `overlap` when the image size isn't stride-aligned), so **every pixel of the canvas is always diffused** — there is no pad/crop edge handling and the output always keeps the input size. The same tile coordinates are used for scoring, the denoise heatmap, and sampling.
 
 Tile scores land directly on an absolute [0, 1] scale (0 = no detail, 1 = maximal detail), are mapped through the `curve` exponent, and scaled to [denoise_min, denoise_max].
 
@@ -222,10 +205,9 @@ Both `quadtree_density` and `structure_energy` are built on **structure energy**
 | `split_threshold` | 0.8 | Optional, `quadtree_density` only. A cell subdivides while its mean structure energy exceeds this. Lower = more of the image counts as detailed. Calibrated on real Z-Image VAE latents (soft ~0.3–0.6, detailed ~1.4+). |
 | `curve` | 1.5 | Controls how denoise is distributed across tiles. See below. |
 | `tile_size` | 1024 | Tile size in pixels |
-| `overlap` | 64 | Overlap between adjacent tiles in pixels. Tiles are feather-blended using a smoothstep curve to hide seams. |
-| `edge_mode` | `center` | How the grid edges are handled when the image size is not a multiple of `tile_size`. `center`: diffuse the centered grid and leave the outer strips as the original upscale. `crop`: crop the output latent and debug images down to the detailed region. `pad`: keep the same tile grid as `center` and add one edge tile per uncovered strip (the latent is edge-replicated outward so they have data), diffuse everything, then crop back to original size (debug maps are cropped to match). Adds up to one extra tile per padded axis. |
+| `overlap` | 64 | Minimum overlap between adjacent tiles in pixels; tiles advance by `tile_size − overlap` and the last tile per axis clamps to the canvas edge (overlapping more where needed). Tiles are feather-blended using a smoothstep curve to hide seams. |
 | `noise_type` | `gaussian` | Initial noise distribution per tile. `gaussian` is standard. Other types require [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF). `brownian` is a good first alternative for portraits and fabric. |
-| `eta_min` | 0.0 | Eta applied to the lowest-denoise tiles. 0 = deterministic ODE for those tiles. Only applies to ancestral/SDE samplers (see Tiled Image Detailer note above). |
+| `eta_min` | 0.0 | Eta applied to the lowest-denoise tiles. 0 = deterministic ODE for those tiles. Only applies to ancestral/SDE samplers: `euler_ancestral`, `dpmpp_sde`, `dpmpp_2s_ancestral`, `dpmpp_2m_sde`, `dpmpp_3m_sde`, `rk_beta`. |
 | `eta_max` | 1.0 | Eta applied to the highest-denoise tiles. Scales linearly from `eta_min` at `denoise_min` to `eta_max` at `denoise_max`. Values above 1.0 amplify noise beyond the SDE derivation — useful for texture but risky above 1.3. |
 
 #### How `curve` works

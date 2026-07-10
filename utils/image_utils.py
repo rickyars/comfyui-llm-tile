@@ -200,89 +200,41 @@ def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
         )
 
 
-def _compute_center_grid(W, H, tile_l, overlap_l):
+def _axis_starts(D, tile_l, overlap_l):
     """
-    Compute a full-coverage tile grid. Grid count is determined by tile_l only.
+    Full-coverage tile start positions along one axis, MultiDiffusion-style.
 
-    Returns (cols, rows) — number of strides in each axis.
-    Tile count in each axis is cols+1 / rows+1.
-
-    Tile positions are anchored at multiples of tile_l. When overlap_l > 0,
-    each non-edge tile extends into its neighbor's territory by overlap_l pixels
-    (see _compute_tile_coords), so the grid count stays the same but tiles overlap.
-    """
-    cols = max(0, W // tile_l - 1)
-    rows = max(0, H // tile_l - 1)
-    return cols, rows
-
-
-def _axis_pad(D, tile_l):
-    """Padding (before, after) for one axis so the centered grid is preserved.
-
-    The centered grid (see _compute_center_grid / _compute_tile_coords) places
-    ``n = D // tile_l`` whole tiles with an undetailed margin of ``round(rem/2)``
-    on the near side and the rest on the far side, where ``rem = D % tile_l``.
-    To cover those margins *without moving any existing tile*, we pad each side
-    that has a margin by ``tile_l - margin`` — turning the partial edge strip
-    into one extra full tile while every original tile keeps its coordinate.
-    The result is always an exact multiple of tile_l.
+    Tiles advance by ``stride = tile_l - overlap_l``; the last tile is clamped
+    to end exactly at the canvas edge (``D - tile_l``), overlapping its
+    neighbor by more than overlap_l when D is not stride-aligned. Every
+    position in [0, D) is covered by at least one tile — there is never an
+    uncovered margin, so no pad/crop edge handling is needed.
     """
     if D <= tile_l:
-        # Smaller than one tile: centre it inside a single tile.
-        total = tile_l - D
-        return total // 2, total - total // 2
-    rem = D % tile_l
-    if rem == 0:
-        return 0, 0
-    near_margin = round(rem / 2)          # matches _compute_tile_coords start
-    far_margin = rem - near_margin
-    pad_before = (tile_l - near_margin) if near_margin > 0 else 0
-    pad_after = (tile_l - far_margin) if far_margin > 0 else 0
-    return pad_before, pad_after
+        return [0]
+    stride = max(1, tile_l - overlap_l)
+    starts = []
+    s = 0
+    while s + tile_l < D:
+        starts.append(s)
+        s += stride
+    starts.append(D - tile_l)
+    return starts
 
 
-def pad_latent_to_grid(canvas, tile_l):
-    """Edge-replicate pad a latent canvas so the centered grid covers it fully.
-
-    Returns (padded_canvas, (pad_top, pad_left)). Padding preserves the
-    center-mode tile positions and appends one edge tile per uncovered margin
-    (see _axis_pad), so pad mode produces the same detail grid as center mode
-    plus edge coverage. An axis already a multiple of tile_l receives zero
-    padding; if both axes are aligned the original tensor is returned unchanged.
-    The (pad_top, pad_left) offsets locate the original region inside the padded
-    canvas so callers can crop back afterward.
+def compute_tile_coords(W, H, tile_l, overlap_l=0):
     """
-    _, _, H, W = canvas.shape
-    pad_top, pad_bottom = _axis_pad(H, tile_l)
-    pad_left, pad_right = _axis_pad(W, tile_l)
-    if pad_top == 0 and pad_bottom == 0 and pad_left == 0 and pad_right == 0:
-        return canvas, (0, 0)
-    padded = F.pad(
-        canvas, (pad_left, pad_right, pad_top, pad_bottom), mode="replicate"
-    )
-    return padded, (pad_top, pad_left)
+    Return row-major full-coverage tile coordinates in latent space.
 
-
-def _compute_tile_coords(W, H, tile_l, cols, rows, overlap_l=0):
+    Returns (coords, n_cols, n_rows) where coords is a list of
+    (y1, x1, y2, x2) and the grid is rectangular: coords[r * n_cols + c].
+    All tiles are the same size — min(tile_l, axis length) per axis — so the
+    model always sees a uniform tile resolution. Coverage is exact: the union
+    of tiles equals the whole canvas (see _axis_starts).
     """
-    Return row-major tile coordinates in latent space.
-
-    The core grid is centered: start_x = round((W - (cols+1)*tile_l) / 2).
-    Each tile anchor is at (start_x + c*tile_l, start_y + r*tile_l). When
-    overlap_l > 0, non-edge tiles are grown into their left/top neighbor's
-    territory by overlap_l pixels, creating positional overlap without
-    adding extra tiles to the grid.
-    """
-    start_x = max(0, round((W - (cols + 1) * tile_l) / 2))
-    start_y = max(0, round((H - (rows + 1) * tile_l) / 2))
-    coords = []
-    for r in range(rows + 1):
-        for c in range(cols + 1):
-            x_anchor = start_x + c * tile_l
-            y_anchor = start_y + r * tile_l
-            x1 = (x_anchor - overlap_l) if c > 0 else x_anchor
-            y1 = (y_anchor - overlap_l) if r > 0 else y_anchor
-            x2 = x_anchor + tile_l
-            y2 = y_anchor + tile_l
-            coords.append((y1, x1, y2, x2))
-    return coords
+    tw = min(tile_l, W)
+    th = min(tile_l, H)
+    xs = _axis_starts(W, tw, overlap_l)
+    ys = _axis_starts(H, th, overlap_l)
+    coords = [(y, x, y + th, x + tw) for y in ys for x in xs]
+    return coords, len(xs), len(ys)
