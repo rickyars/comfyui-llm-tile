@@ -145,7 +145,8 @@ def build_working_tensor(final_tensor, final_pos_x, final_pos_y,
     return working_tensor, keep_mask
 
 
-def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
+def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top,
+                         overlap_x=None, overlap_y=None):
     """
     Write a refined latent tile into canvas with linear feathering on overlap edges.
 
@@ -155,17 +156,24 @@ def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
     overlap_l: overlap width/height in latent pixels
     has_left:  True when a previously placed tile overlaps from the left
     has_top:   True when a previously placed tile overlaps from above
+    overlap_x/overlap_y: actual per-axis overlap with the neighbor, when it
+      differs from overlap_l. The clamped last tile per axis can overlap its
+      neighbor by more than the configured overlap (even when overlap_l == 0),
+      and hard-writing that zone unfeathered leaves a seam — so the feather
+      width must follow the real overlap, not the configured one.
     """
     _, _, tile_h, tile_w = refined.shape
     refined_cpu = refined.cpu()
+    ox = overlap_l if overlap_x is None else overlap_x
+    oy = overlap_l if overlap_y is None else overlap_y
 
     # Save existing canvas values in overlap zones before overwriting
-    left_zone = (canvas[:, :, y1:y1 + tile_h, x1:x1 + overlap_l].clone()
-                 if (has_left and overlap_l > 0) else None)
-    top_zone = (canvas[:, :, y1:y1 + overlap_l, x1:x1 + tile_w].clone()
-                if (has_top and overlap_l > 0) else None)
-    corner_zone = (canvas[:, :, y1:y1 + overlap_l, x1:x1 + overlap_l].clone()
-                   if (has_left and has_top and overlap_l > 0) else None)
+    left_zone = (canvas[:, :, y1:y1 + tile_h, x1:x1 + ox].clone()
+                 if (has_left and ox > 0) else None)
+    top_zone = (canvas[:, :, y1:y1 + oy, x1:x1 + tile_w].clone()
+                if (has_top and oy > 0) else None)
+    corner_zone = (canvas[:, :, y1:y1 + oy, x1:x1 + ox].clone()
+                   if (has_left and has_top and ox > 0 and oy > 0) else None)
 
     # Hard-write the full refined tile
     canvas[:, :, y1:y1 + tile_h, x1:x1 + tile_w] = refined_cpu
@@ -174,29 +182,29 @@ def feather_blend_latent(canvas, refined, y1, x1, overlap_l, has_left, has_top):
         return t * t * (3.0 - 2.0 * t)
 
     # Left overlap: ramp alpha 0→1 across overlap columns (old canvas → refined)
-    if left_zone is not None and tile_w > overlap_l:
-        alpha = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, 1, overlap_l)
-        canvas[:, :, y1:y1 + tile_h, x1:x1 + overlap_l] = (
-            (1.0 - alpha) * left_zone + alpha * refined_cpu[:, :, :, :overlap_l]
+    if left_zone is not None and tile_w > ox:
+        alpha = _smoothstep(torch.linspace(0.0, 1.0, ox, device=canvas.device)).view(1, 1, 1, ox)
+        canvas[:, :, y1:y1 + tile_h, x1:x1 + ox] = (
+            (1.0 - alpha) * left_zone + alpha * refined_cpu[:, :, :, :ox]
         )
 
     # Top overlap: ramp alpha 0→1 across overlap rows (old canvas → refined)
-    if top_zone is not None and tile_h > overlap_l:
-        alpha = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, overlap_l, 1)
-        canvas[:, :, y1:y1 + overlap_l, x1:x1 + tile_w] = (
-            (1.0 - alpha) * top_zone + alpha * refined_cpu[:, :, :overlap_l, :]
+    if top_zone is not None and tile_h > oy:
+        alpha = _smoothstep(torch.linspace(0.0, 1.0, oy, device=canvas.device)).view(1, 1, oy, 1)
+        canvas[:, :, y1:y1 + oy, x1:x1 + tile_w] = (
+            (1.0 - alpha) * top_zone + alpha * refined_cpu[:, :, :oy, :]
         )
 
     # Corner: min(alpha_x, alpha_y) for smooth 2D diagonal blend
-    if corner_zone is not None and tile_w > overlap_l and tile_h > overlap_l:
-        alpha_x = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, 1, overlap_l)
-        alpha_y = _smoothstep(torch.linspace(0.0, 1.0, overlap_l, device=canvas.device)).view(1, 1, overlap_l, 1)
+    if corner_zone is not None and tile_w > ox and tile_h > oy:
+        alpha_x = _smoothstep(torch.linspace(0.0, 1.0, ox, device=canvas.device)).view(1, 1, 1, ox)
+        alpha_y = _smoothstep(torch.linspace(0.0, 1.0, oy, device=canvas.device)).view(1, 1, oy, 1)
         alpha = torch.min(
-            alpha_x.expand(1, 1, overlap_l, overlap_l),
-            alpha_y.expand(1, 1, overlap_l, overlap_l),
+            alpha_x.expand(1, 1, oy, ox),
+            alpha_y.expand(1, 1, oy, ox),
         )
-        canvas[:, :, y1:y1 + overlap_l, x1:x1 + overlap_l] = (
-            (1.0 - alpha) * corner_zone + alpha * refined_cpu[:, :, :overlap_l, :overlap_l]
+        canvas[:, :, y1:y1 + oy, x1:x1 + ox] = (
+            (1.0 - alpha) * corner_zone + alpha * refined_cpu[:, :, :oy, :ox]
         )
 
 

@@ -134,7 +134,18 @@ class TiledImageGeneratorAdvanced:
 
                     latent_image = comfy.sample.fix_empty_latent_channels(
                         orig_patcher, torch.zeros((1, 4, gen_h8 // 8, gen_w8 // 8), device=device))
-                    tile_noise = noise.generate_noise({"samples": latent_image})
+                    # RandomNoise-style NOISE objects reuse their single stored
+                    # seed on every generate_noise call, which would give every
+                    # equal-shaped tile bit-identical noise; retarget the seed
+                    # per tile (restored after) so tiles decorrelate.
+                    _orig_noise_seed = getattr(noise, "seed", None)
+                    if _orig_noise_seed is not None:
+                        noise.seed = current_seed & 0xffffffffffffffff
+                    try:
+                        tile_noise = noise.generate_noise({"samples": latent_image})
+                    finally:
+                        if _orig_noise_seed is not None:
+                            noise.seed = _orig_noise_seed
 
                     guider.set_conds(positive, negative)
                     samples = guider.sample(

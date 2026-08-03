@@ -98,12 +98,14 @@ def _scores_to_denoise(scores, curve, denoise_min, denoise_max):
       t      — the (clamped) input score, used for the heatmap
       denoise — final per-tile denoise value
 
-    The mapping is absolute: a tile's denoise depends only on its own score,
-    never on the other tiles in the image. Earlier versions min-max normalized
-    scores within the image, which made every image — however soft — stretch
-    to denoise_max somewhere; that made batch processing with fixed min/max
-    impossible (a soft tile's denoise depended on what it shared the image with).
-    Both scoring methods now emit scores that are already meaningful in [0, 1].
+    This function itself is a pure per-score mapping, but note the scoring
+    methods feeding it are canvas-relative (each tile is ranked within its
+    own canvas's energy distribution — see _tile_structure_energy and
+    _tile_quadtree_density), so scores, and therefore denoise values, are
+    NOT comparable across different images: the same physical tile can land
+    at different denoise in different canvases. Absolute cross-batch scoring
+    was tried and abandoned — no fixed energy constant survives a VAE or
+    upscale-ratio change.
     """
     result = []
     for v in scores:
@@ -216,17 +218,23 @@ def _build_denoise_map(tile_coords, t_values, canvas_h, canvas_w, n_cols, n_rows
 
 
 # --- Latent structure energy ------------------------------------------------
-# VAE latents (measured on the Z-Image / Flux ae) carry a high-amplitude,
-# high-frequency "carrier" regardless of pixel content: raw latent gradient
-# energy is ~2.2 for soft image regions and ~2.5 for detailed ones — useless
-# for telling them apart, and blur-ratio measures saturate at ~0.93 everywhere.
-# Downsampling the latent 4x averages the carrier away; the gradient energy of
-# what survives is actual image structure. Measured on real 1024px-tile
-# latents: soft (sky, dark backgrounds, smooth skin) 0.28-0.59, detailed
-# (faces, hair, figure groups) 1.45-1.62.
+# VAE latents carry a high-amplitude, high-frequency "carrier" regardless of
+# pixel content — raw latent gradient energy alone can't tell soft regions
+# from detailed ones. Downsampling the latent 4x averages the carrier away;
+# the gradient energy of what survives is actual image structure.
+#
+# The *absolute* magnitude of that energy is not portable: it depends on
+# which VAE encoded the latent (measured ~2.5x different between the
+# Z-Image/Flux ae and the Qwen Image VAE for the same source image) and how
+# much the canvas was upscaled before encoding (lanczos upscaling smooths
+# real detail, lowering measured energy the more a canvas was stretched).
+# Comparing against any fixed constant broke on every VAE/scale change we
+# tried. What's actually being asked — "where in *this* image is there more
+# detail than elsewhere" — is a per-canvas ranking question, not an absolute
+# one, so scoring is done by percentile rank within the canvas's own energy
+# distribution: scale- and VAE-invariant by construction, since it never
+# looks at absolute magnitude at all.
 _STRUCTURE_POOL = 4
-# Energy that counts as a full-detail score of 1.0 (see measurements above).
-_STRUCTURE_REF = 2.0
 
 
 def _latent_structure_map(canvas):
@@ -237,7 +245,11 @@ def _latent_structure_map(canvas):
     (channel-mean), upsampled back to latent resolution with nearest so
     regions can be scored at any granularity.
     """
-    p = F.avg_pool2d(canvas.detach().cpu(), _STRUCTURE_POOL)
+    x = canvas.detach().cpu()
+    # avg_pool2d raises when a spatial dim is smaller than the kernel
+    # (latent strips under 4px); shrink the kernel rather than crash.
+    pool = max(1, min(_STRUCTURE_POOL, x.shape[-2], x.shape[-1]))
+    p = F.avg_pool2d(x, pool)
     g = torch.zeros(p.shape[0], 1, p.shape[2], p.shape[3])
     if p.shape[2] >= 2 and p.shape[3] >= 2:
         dx = (p[:, :, :, 1:] - p[:, :, :, :-1]).pow(2).mean(dim=1, keepdim=True)
@@ -247,145 +259,288 @@ def _latent_structure_map(canvas):
     return F.interpolate(g, size=canvas.shape[-2:], mode="nearest")
 
 
-def _tile_structure_energy(canvas, tile_coords):
+_STRUCTURE_PERCENTILE = 0.85  # per-tile: "does this tile contain detail", not "is it detailed on average"
+_STRUCTURE_FLOOR_PERCENTILE = 0.05   # per-canvas: tile energy that maps to score 0
+_STRUCTURE_CEIL_PERCENTILE = 0.95    # per-canvas: tile energy that maps to score 1
+# A p95/p05 *ratio* test was tried to gate out "no real detail anywhere"
+# canvases (pure carrier noise) before ranking — scale-invariant in theory,
+# since it never looks at absolute magnitude. It doesn't hold up: pure
+# synthetic carrier noise measured ratio ~6-15x at pixel granularity, but a
+# real photograph's actual tile-to-tile detail separation measured only
+# ~2.9x after per-tile percentile aggregation (aggregation smooths the
+# extremes further than raw pixels) — lower than the "pure noise" case it
+# was meant to reject. There is no statistic here that reliably tells
+# "real but subtle detail" apart from "no detail at all"; only an exact
+# zero-variance canvas (every tile identical) is unambiguous, so that's all
+# that's special-cased below.
+_STRUCTURE_DIVIDE_EPS = 1e-9
+
+
+def _tile_structure_values(canvas, tile_coords):
     """
-    Score tiles by mean structure energy, normalized so _STRUCTURE_REF -> 1.0:
-
-        score = clamp(mean(structure_map[tile]) / _STRUCTURE_REF, 0, 1)
-
-    An absolute [0, 1] detail measure calibrated on real Z-Image VAE latents:
-    soft regions land around 0.15-0.3, detailed regions around 0.7-0.8+.
-    Comparable across tiles, images, and batches.
+    Per-tile structure energy: the _STRUCTURE_PERCENTILE-th percentile of
+    structure energy within the tile (not the mean — see module docstring
+    above _tile_structure_energy for why). Returns raw (unnormalized)
+    values, shared by _tile_structure_energy and _build_structure_map so
+    both use the same canvas-relative low/high bounds.
     """
     smap = _latent_structure_map(canvas)
-    result = []
-    for (y1, x1, y2, x2) in tile_coords:
-        e = smap[:, :, y1:y2, x1:x2].mean().item()
-        result.append(min(1.0, e / _STRUCTURE_REF))
-    return result
+    return smap, [
+        torch.quantile(smap[:, :, y1:y2, x1:x2].flatten(), _STRUCTURE_PERCENTILE).item()
+        for (y1, x1, y2, x2) in tile_coords
+    ]
 
 
-def _build_structure_map(canvas):
+def _canvas_structure_bounds(values):
     """
-    Pixel-space grayscale preview of latent structure energy:
-    white = full-detail energy (>= _STRUCTURE_REF), black = no structure.
+    (low, high) energy bounds for this canvas's own tile values, at
+    _STRUCTURE_FLOOR_PERCENTILE / _STRUCTURE_CEIL_PERCENTILE. Returns
+    (0, 0) only for a canvas with exactly zero energy spread (every tile
+    identical) — the one case where ranking is meaningless rather than just
+    low-contrast.
+    """
+    t = torch.tensor(values)
+    lo = torch.quantile(t, _STRUCTURE_FLOOR_PERCENTILE).item()
+    hi = torch.quantile(t, _STRUCTURE_CEIL_PERCENTILE).item()
+    if hi - lo < _STRUCTURE_DIVIDE_EPS:
+        return 0.0, 0.0
+    return lo, hi
+
+
+def _block_structure_bounds(smap, min_cell=4):
+    """
+    Canvas-relative (lo, hi) bounds from min_cell-block energies instead of
+    per-tile energies. Used when the tile grid is too small to rank against
+    itself: with 1 tile, p05/p95 of a single value collapse (lo == hi, every
+    tile forced to 0); with 2-3 tiles they pin near-identical tiles to the
+    0/1 extremes. Block granularity always gives a real distribution.
+    """
+    H, W = smap.shape[-2:]
+    hb, wb = max(1, H // min_cell), max(1, W // min_cell)
+    ch, cw = min(min_cell, H), min(min_cell, W)
+    blocks = smap[0, 0, :hb * ch, :wb * cw] \
+        .unfold(0, ch, ch).unfold(1, cw, cw).reshape(-1, ch * cw)
+    energies = torch.quantile(blocks, _STRUCTURE_PERCENTILE, dim=1)
+    return _canvas_structure_bounds(energies.tolist())
+
+
+def _tile_structure_energy(canvas, tile_coords):
+    """
+    Score tiles by where their structure energy ranks within this canvas's
+    own distribution of tile energies — not against any absolute constant.
+
+        score = clamp((tile_energy - canvas_p05) / (canvas_p95 - canvas_p05), 0, 1)
+
+    This is the actual question being asked ("where in this image is there
+    more detail than elsewhere"), and it is scale- and VAE-invariant by
+    construction: it never compares against a fixed magnitude, so it can't
+    be thrown off by which VAE encoded the latent or how much the canvas
+    was upscaled beforehand — both of which change the *absolute* energy
+    scale but not the *relative* ranking of tiles within one canvas.
+    A canvas with no meaningful energy spread anywhere (flat, or carrier
+    noise only) scores every tile 0 rather than promoting its least-flat
+    tile to look detailed.
+    """
+    smap, values = _tile_structure_values(canvas, tile_coords)
+    # Fewer than 4 tiles can't produce meaningful p05/p95 bounds from their
+    # own values (1 tile: lo==hi, forced to 0; 2-3 tiles: near-identical
+    # tiles pinned to the extremes) — rank against block-level energies then.
+    if len(values) >= 4:
+        lo, hi = _canvas_structure_bounds(values)
+    else:
+        lo, hi = _block_structure_bounds(smap)
+    if hi == lo:  # degenerate zero-spread canvas (see _canvas_structure_bounds)
+        return [0.0 for _ in values]
+    return [max(0.0, min(1.0, (v - lo) / (hi - lo))) for v in values]
+
+
+def _build_structure_map(canvas, tile_coords=None):
+    """
+    Pixel-space grayscale preview of latent structure energy, normalized
+    against the canvas's own energy distribution (see _tile_structure_energy):
+    white = at/above the canvas's own p95, black = at/below its p05.
+
+    tile_coords is used only to establish the canvas-relative bounds; when
+    omitted, a coarse fixed grid over the canvas is used instead so the
+    preview is still meaningful on its own.
 
     Returns: IMAGE tensor [1, H*8, W*8, 3]
     """
-    mask = (_latent_structure_map(canvas) / _STRUCTURE_REF).clamp(0.0, 1.0)
+    smap = _latent_structure_map(canvas)
+    if tile_coords is None:
+        _, _, H, W = canvas.shape
+        # //8 keeps the grid at tile scale on normal canvases; below 8px on
+        # the short side that would degenerate to step=1 (one tile per
+        # pixel), so floor it at min_cell-sized blocks instead.
+        step = max(4, min(H, W) // 8)
+        tile_coords = [
+            (y, x, min(y + step, H), min(x + step, W))
+            for y in range(0, H, step) for x in range(0, W, step)
+        ]
+    values = [
+        torch.quantile(smap[:, :, y1:y2, x1:x2].flatten(), _STRUCTURE_PERCENTILE).item()
+        for (y1, x1, y2, x2) in tile_coords
+    ]
+    if len(values) >= 4:
+        lo, hi = _canvas_structure_bounds(values)
+    else:
+        lo, hi = _block_structure_bounds(smap)
+    if hi == lo:
+        mask = torch.zeros_like(smap)
+    else:
+        mask = ((smap - lo) / (hi - lo)).clamp(0.0, 1.0)
     img = mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
     return img.repeat_interleave(8, dim=1).repeat_interleave(8, dim=2)
 
 
-# Structure energy above which a quadtree cell subdivides. Sits between the
-# measured soft (0.28-0.59) and detailed (1.45+) bands of real latents.
-_DEFAULT_SPLIT_THRESHOLD = 0.8
+# split_percentile: a cell subdivides while its own structure energy exceeds
+# this percentile of the *whole canvas's* energy distribution. A percentile
+# of the canvas's own content, not an absolute energy value — scale- and
+# VAE-invariant for the same reason _tile_structure_energy is (see its
+# docstring): "detailed" is relative to what else is in this image.
+_DEFAULT_SPLIT_PERCENTILE = 0.6
 
-# Raw leaf density that counts as a full-detail score of 1.0. The theoretical
-# maximum (every leaf at the min_cell floor) is unreachable on real content:
-# detail is heterogeneous, so subdivision stops early in the flatter parts of
-# even the busiest tile. Measured raw density on real latents: detailed
-# (faces, hair, figure groups) 0.31-0.44, soft ~0.001.
-_QUADTREE_REF = 0.45
-
-
-def _build_canvas_quadtree(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_THRESHOLD):
+def _quadtree_hot_blocks(canvas, min_cell=4, split_percentile=_DEFAULT_SPLIT_PERCENTILE):
     """
-    Run a threshold-based quadtree over the whole canvas.
-
-    A cell splits only when it holds sufficient information — mean structure
-    energy (see _latent_structure_map) above split_threshold — and stops at
-    min_cell. There is no subdivision budget and no competition between
-    regions: whether a cell splits depends only on its own content, so the
-    resulting leaf structure is an absolute measure. A uniformly soft canvas
-    genuinely produces few, large leaves everywhere.
+    Boolean [hb, wb] grid of "hot" min_cell blocks: blocks whose
+    _STRUCTURE_PERCENTILE energy exceeds the canvas's own split_percentile
+    quantile of block energies. Threshold and block statistic are computed
+    at the SAME granularity — earlier versions compared block statistics
+    against per-pixel (or mixed-size-cell) percentiles, which are on a
+    different scale: a large cell's percentile converges to the canvas-wide
+    one and always clears a lower-percentile threshold, so even pure-noise
+    canvases subdivided fully and every tile saturated to 1.0.
 
     Structure energy rather than raw latent std is essential: real VAE
     latents have std ~1-3 *everywhere* (soft or detailed), so a std-based
-    criterion subdivides soft images just as heavily as detailed ones.
+    criterion marks soft images just as heavily as detailed ones.
 
-    Recursion is bounded by min_cell, so no iteration cap is needed.
-
-    Returns: list of (ry, rx, rh, rw) leaf cells covering the full canvas.
+    Returns (hot, H, W): hot mask over blocks; H, W the latent dims.
+    Edges: the canvas is replicate-padded up to a multiple of min_cell so
+    right/bottom remainder strips participate in the threshold.
     """
     smap = _latent_structure_map(canvas)[0, 0]  # [H, W] CPU
     H, W = smap.shape
+    pad_h = (-H) % min_cell
+    pad_w = (-W) % min_cell
+    if pad_h or pad_w:
+        smap = F.pad(smap[None, None], (0, pad_w, 0, pad_h), mode="replicate")[0, 0]
+    hb, wb = smap.shape[0] // min_cell, smap.shape[1] // min_cell
+    blocks = smap.unfold(0, min_cell, min_cell).unfold(1, min_cell, min_cell) \
+        .reshape(hb, wb, min_cell * min_cell)
+    block_energy = torch.quantile(blocks, _STRUCTURE_PERCENTILE, dim=2)
+    # Threshold as a VALUE interpolated across the canvas's own p05..p95
+    # block-energy range — not a count percentile. A count percentile (p-th
+    # quantile of block energies) guarantees (1-p) of blocks are hot on ANY
+    # canvas, including pure carrier noise where all blocks are nearly equal
+    # — which is exactly how every tile saturated before. With a value
+    # threshold, near-equal blocks all sit below it (nothing is meaningfully
+    # hotter than the rest), while real detail pockets clear it decisively.
+    lo = torch.quantile(block_energy.flatten(), _STRUCTURE_FLOOR_PERCENTILE).item()
+    hi = torch.quantile(block_energy.flatten(), _STRUCTURE_CEIL_PERCENTILE).item()
+    if hi - lo < _STRUCTURE_DIVIDE_EPS:
+        return torch.zeros_like(block_energy, dtype=torch.bool), H, W
+    threshold = lo + split_percentile * (hi - lo)
+    return block_energy > threshold, H, W
 
-    stack = [(0, 0, H, W)]
+
+def _build_canvas_quadtree(canvas, min_cell=4, split_percentile=_DEFAULT_SPLIT_PERCENTILE):
+    """
+    Run a quadtree over the whole canvas on the hot-block grid.
+
+    A cell splits while it contains at least one hot block (see
+    _quadtree_hot_blocks) and is larger than one block per axis, isolating
+    each pocket of above-threshold detail down to the min_cell floor while
+    leaving flat regions as large leaves. Recursion is bounded by the block
+    grid, so no iteration cap is needed.
+
+    Returns: list of (ry, rx, rh, rw) latent-coordinate leaf cells that
+    partition the full canvas.
+    """
+    hot, H, W = _quadtree_hot_blocks(canvas, min_cell, split_percentile)
+    hb, wb = hot.shape
+    # 2D prefix sum for O(1) any-hot-in-rect queries.
+    csum = hot.to(torch.int32).cumsum(0).cumsum(1)
+
+    def _hot_count(by, bx, bh, bw):
+        total = csum[by + bh - 1, bx + bw - 1].item()
+        if by > 0:
+            total -= csum[by - 1, bx + bw - 1].item()
+        if bx > 0:
+            total -= csum[by + bh - 1, bx - 1].item()
+        if by > 0 and bx > 0:
+            total += csum[by - 1, bx - 1].item()
+        return total
+
+    stack = [(0, 0, hb, wb)]
     leaves = []
-
     while stack:
-        ry, rx, rh, rw = stack.pop()
-
-        half_h = rh // 2
-        half_w = rw // 2
-        can_h = half_h >= min_cell
-        can_w = half_w >= min_cell
-
-        if (not can_h and not can_w) or \
-                smap[ry:ry + rh, rx:rx + rw].mean().item() <= split_threshold:
-            leaves.append((ry, rx, rh, rw))
+        by, bx, bh, bw = stack.pop()
+        can_h = bh >= 2
+        can_w = bw >= 2
+        if (not can_h and not can_w) or _hot_count(by, bx, bh, bw) == 0:
+            # Convert block coords to latent coords, clipping the padded edge.
+            ry, rx = by * min_cell, bx * min_cell
+            rh = min(bh * min_cell, H - ry)
+            rw = min(bw * min_cell, W - rx)
+            if rh > 0 and rw > 0:
+                leaves.append((ry, rx, rh, rw))
             continue
-
+        half_h = bh // 2
+        half_w = bw // 2
         if can_h and can_w:
-            children = [
-                (ry,          rx,           half_h,       half_w),
-                (ry,          rx + half_w,  half_h,       rw - half_w),
-                (ry + half_h, rx,           rh - half_h,  half_w),
-                (ry + half_h, rx + half_w,  rh - half_h,  rw - half_w),
-            ]
+            stack += [(by, bx, half_h, half_w),
+                      (by, bx + half_w, half_h, bw - half_w),
+                      (by + half_h, bx, bh - half_h, half_w),
+                      (by + half_h, bx + half_w, bh - half_h, bw - half_w)]
         elif can_h:
-            children = [
-                (ry,          rx,  half_h,      rw),
-                (ry + half_h, rx,  rh - half_h, rw),
-            ]
+            stack += [(by, bx, half_h, bw), (by + half_h, bx, bh - half_h, bw)]
         else:
-            children = [
-                (ry, rx,          rh,  half_w),
-                (ry, rx + half_w, rh,  rw - half_w),
-            ]
-
-        stack.extend(children)
+            stack += [(by, bx, bh, half_w), (by, bx + half_w, bh, bw - half_w)]
 
     return leaves
 
 
 def _tile_quadtree_density(canvas, tile_coords, min_cell=4,
-                           split_threshold=_DEFAULT_SPLIT_THRESHOLD):
+                           split_percentile=_DEFAULT_SPLIT_PERCENTILE):
     """
-    Score tiles by quadtree leaf density from a single global canvas quadtree.
-
-    Runs one threshold-based quadtree over the whole canvas (see
-    _build_canvas_quadtree), then scores each tile by counting leaves whose
-    center falls within it, normalized to an absolute [0, 1] scale:
-
-        raw = leaves_with_center_in_tile * min_cell^2 / tile_area
-        score = clamp(raw / _QUADTREE_REF, 0, 1)
-
-    raw is the fraction of the tile subdivided to the min_cell floor; it is
-    referenced to _QUADTREE_REF (the ceiling actually reached by real
-    detailed latents) rather than 1.0, which real heterogeneous detail never
-    attains. The score is comparable across images and batches — a soft tile
-    scores low regardless of what else is in the image.
+    Score tiles by hot-block coverage: the fraction of the tile's area
+    covered by blocks whose energy meaningfully exceeds the canvas's own
+    energy range (see _quadtree_hot_blocks). A fully detailed tile is fully
+    hot and scores 1.0; a flat tile has no hot blocks and scores 0.0; a
+    canvas with no meaningful spread anywhere has no hot blocks at all.
+    No fixed ceiling constant — the old _QUADTREE_REF=0.45 was calibrated
+    under an absolute threshold and saturated once thresholds became
+    canvas-relative. Scores rank tiles within this canvas.
     """
-    leaves = _build_canvas_quadtree(canvas, min_cell, split_threshold)
-    result = []
+    hot, H, W = _quadtree_hot_blocks(canvas, min_cell, split_percentile)
+    # Per-latent-pixel hot mask, clipped back to the unpadded canvas.
+    hotpix = hot.repeat_interleave(min_cell, 0).repeat_interleave(min_cell, 1)[:H, :W]
+    raws = []
     for (y1, x1, y2, x2) in tile_coords:
-        th = y2 - y1
-        tw = x2 - x1
-        if th <= 0 or tw <= 0:
-            result.append(0.0)
+        if y2 <= y1 or x2 <= x1:
+            raws.append(0.0)
             continue
-        count = sum(
-            1 for (ry, rx, rh, rw) in leaves
-            if y1 <= ry + rh // 2 < y2 and x1 <= rx + rw // 2 < x2
-        )
-        raw = count * (min_cell * min_cell) / (th * tw)
-        result.append(min(1.0, raw / _QUADTREE_REF))
-    return result
+        raws.append(hotpix[y1:y2, x1:x2].float().mean().item())
+    # Raw coverage rarely approaches 1.0 on real content (detail is
+    # heterogeneous within a tile — measured max ~0.25 on a real painting at
+    # the default percentile), which would compress every tile toward
+    # denoise_min. Reference to the canvas's own p95 tile coverage so the
+    # busiest tiles reach 1.0 — same canvas-relative normalization as
+    # structure_energy. Flat tiles stay exactly 0 (no hot blocks at all).
+    if len(raws) >= 4:
+        hi = torch.quantile(torch.tensor(raws), _STRUCTURE_CEIL_PERCENTILE).item()
+    else:
+        # Too few tiles to rank against each other (a single tile would
+        # always normalize to 1.0 against itself); raw coverage is already
+        # a meaningful in-tile fraction, use it directly.
+        hi = 1.0
+    if hi < _STRUCTURE_DIVIDE_EPS:
+        return [0.0 for _ in raws]
+    return [min(1.0, r / hi) for r in raws]
 
 
-def _build_quadtree_map(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_THRESHOLD):
+def _build_quadtree_map(canvas, min_cell=4, split_percentile=_DEFAULT_SPLIT_PERCENTILE):
     """
     Build a pixel-space visualization of the global canvas quadtree.
 
@@ -398,7 +553,7 @@ def _build_quadtree_map(canvas, min_cell=4, split_threshold=_DEFAULT_SPLIT_THRES
     _, H, W = sample.shape
     img = torch.zeros(1, H * 8, W * 8, 3)
 
-    for (ry, rx, rh, rw) in _build_canvas_quadtree(canvas, min_cell, split_threshold):
+    for (ry, rx, rh, rw) in _build_canvas_quadtree(canvas, min_cell, split_percentile):
         py0, py1 = ry * 8, (ry + rh) * 8
         px0, px1 = rx * 8, (rx + rw) * 8
         img[0, py0:min(py0 + 2, py1), px0:px1, :] = 1.0
@@ -440,8 +595,8 @@ class LLMAdaptiveTileDetailer:
                                       "tooltip": "Eta for highest-denoise tiles. Scales linearly from eta_min (at denoise_min) to eta_max (at denoise_max)."}),
             },
             "optional": {
-                "split_threshold": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 5.0, "step": 0.01,
-                                              "tooltip": "quadtree_density only: a cell subdivides while its mean structure energy exceeds this. Lower = more of the image counts as detailed. Calibrated on real Z-Image VAE latents: soft regions measure ~0.3-0.6, detailed ~1.4+."}),
+                "split_percentile": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.01,
+                                               "tooltip": "quadtree_density only: a block counts as detailed when its structure energy exceeds a value this far across the canvas's own low-to-high energy range. Lower = more of the image counts as detailed. Canvas-relative, so it holds steady across VAEs and upscale ratios."}),
             }
         }
 
@@ -454,7 +609,7 @@ class LLMAdaptiveTileDetailer:
                seed, steps, cfg, sampler_name, scheduler,
                scoring_method, denoise_min, denoise_max, curve,
                tile_size, overlap, noise_type, eta_min, eta_max,
-               split_threshold=_DEFAULT_SPLIT_THRESHOLD):
+               split_percentile=_DEFAULT_SPLIT_PERCENTILE):
 
         canvas = upscaled_latent["samples"].clone()
         # Video-latent-format models (e.g. Krea2 with the Wan VAE) hand us a 5D
@@ -499,11 +654,11 @@ class LLMAdaptiveTileDetailer:
             scores = _tile_otsu_scores(canvas, tile_coords)
             scoring_map_img = _build_otsu_map(canvas)
         elif scoring_method == "quadtree_density":
-            scores = _tile_quadtree_density(canvas, tile_coords, split_threshold=split_threshold)
-            scoring_map_img = _build_quadtree_map(canvas, split_threshold=split_threshold)
+            scores = _tile_quadtree_density(canvas, tile_coords, split_percentile=split_percentile)
+            scoring_map_img = _build_quadtree_map(canvas, split_percentile=split_percentile)
         elif scoring_method == "structure_energy":
             scores = _tile_structure_energy(canvas, tile_coords)
-            scoring_map_img = _build_structure_map(canvas)
+            scoring_map_img = _build_structure_map(canvas, tile_coords)
         else:
             raise ValueError(f"Unknown scoring_method: {scoring_method!r}")
 
@@ -528,7 +683,10 @@ class LLMAdaptiveTileDetailer:
 
             t_eta = (tile_denoise - denoise_min) / drange if drange > 0 else 0.0
             tile_eta = eta_min + (eta_max - eta_min) * t_eta
-            tile_seed = seed + tile_idx
+            # Mask to torch's valid seed range: at the widget max
+            # (0xffffffffffffffff), seed + tile_idx would overflow and
+            # torch.manual_seed raises mid-run.
+            tile_seed = (seed + tile_idx) & 0xffffffffffffffff
             tile_latent = canvas[:, :, y1:y2, x1:x2].clone()
 
             if tile_denoise >= 1.0:
@@ -557,10 +715,16 @@ class LLMAdaptiveTileDetailer:
             if refined.ndim == 5:
                 refined = refined.squeeze(2)
 
+            # Feather across the ACTUAL overlap with the neighbor, not the
+            # configured one: the clamped last tile per axis overlaps by
+            # more than overlap_l (even when overlap_l == 0), and an
+            # unfeathered hard write there leaves a visible seam.
+            left_ov = (tile_coords[tile_idx - 1][3] - x1) if c > 0 else 0
+            top_ov = (tile_coords[tile_idx - n_cols][2] - y1) if r > 0 else 0
             feather_blend_latent(
                 canvas, refined, y1, x1, overlap_l,
-                has_left=(c > 0 and x1 < tile_coords[tile_idx - 1][3]),
-                has_top=(r > 0 and y1 < tile_coords[tile_idx - n_cols][2]),
+                has_left=left_ov > 0, has_top=top_ov > 0,
+                overlap_x=max(overlap_l, left_ov), overlap_y=max(overlap_l, top_ov),
             )
 
             # Flushing the CUDA cache every tile costs real time and mostly frees
@@ -573,7 +737,12 @@ class LLMAdaptiveTileDetailer:
 
         if temporal_latent:
             canvas = canvas.unsqueeze(2)
-        return ({"samples": canvas}, denoise_map_img, scoring_map_img)
+        # Preserve non-samples keys (noise_mask, batch_index) for downstream
+        # nodes. Note: noise_mask is passed through, not honored — per-tile
+        # sampling here does not mask which regions get re-detailed.
+        out_latent = dict(upscaled_latent)
+        out_latent["samples"] = canvas
+        return (out_latent, denoise_map_img, scoring_map_img)
 
 
 NODE_CLASS_MAPPINGS = {
